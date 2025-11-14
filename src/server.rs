@@ -1,22 +1,23 @@
+use crate::config::Config;
 use axum::{
     routing::get,
     Router,
-    extract::Path,
+    extract::{Path, State},
     response::IntoResponse,
     http::StatusCode,
 };
 use tracing::{info, error};
 use crate::stitcher::parser;
 
-pub async fn start() -> Result<(), Box<dyn std::error::Error>> {
-  let addr = "0.0.0.0:3000";
+pub async fn start(config: Config) -> Result<(), Box<dyn std::error::Error>> {
+  let addr = format!("0.0.0.0:{}", config.port);
 
   let app = Router::new()
     .route("/", get(health_check))
     .route("/health", get(health_check))
-    .route("/stitch/{session_id}/playlist.m3u8", get(serve_playlist));
+    .route("/stitch/{session_id}/playlist.m3u8", get(serve_playlist)).with_state(config);
 
-  let listener = match tokio::net::TcpListener::bind(addr).await {
+  let listener = match tokio::net::TcpListener::bind(addr.as_str()).await {
     Ok(listener) => listener,
     Err(e) => {
       error!("Failed to bind to address {}: {}", addr, e);
@@ -38,7 +39,7 @@ async fn health_check() -> &'static str {
     "🦀 Ritcher is running!"
 }
 
-async fn serve_playlist(Path(session_id): Path<String>) -> impl IntoResponse {
+async fn serve_playlist(Path(session_id): Path<String>, State(config): State<Config>) -> impl IntoResponse {
   info!("Serving playlist for session: {}", session_id);
 
   // for now: read test file
@@ -58,7 +59,7 @@ async fn serve_playlist(Path(session_id): Path<String>) -> impl IntoResponse {
     }
   };
 
-  let modified_playlist = match parser::modify_playlist(playlist, &session_id) {
+  let modified_playlist = match parser::modify_playlist(playlist, &session_id, &config.base_url) {
     Ok(p) => p,
     Err(e) => {
       error!("Failed to modify playlist: {:?}", e);
