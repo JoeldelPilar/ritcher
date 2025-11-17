@@ -17,7 +17,8 @@ pub async fn start(config: Config) -> Result<(), Box<dyn std::error::Error>> {
   let app = Router::new()
     .route("/", get(health_check))
     .route("/health", get(health_check))
-    .route("/stitch/{session_id}/playlist.m3u8", get(serve_playlist)).with_state(config);
+    .route("/stitch/{session_id}/playlist.m3u8", get(serve_playlist))
+    .route("/stitch/{session_id}/segment/{*segment_path}", get(serve_segment)).with_state(config);
 
   let listener = match tokio::net::TcpListener::bind(addr.as_str()).await {
     Ok(listener) => listener,
@@ -81,7 +82,11 @@ async fn serve_playlist(
     }
   };
 
-  let modified_playlist = match parser::modify_playlist(playlist, &session_id, &config.base_url) {
+  let origin_base = origin_url.rsplit_once('/')
+    .map(|(base, _)| base)
+    .unwrap_or(origin_url);
+
+  let modified_playlist = match parser::modify_playlist(playlist, &session_id, &config.base_url, origin_base) {
     Ok(p) => p,
     Err(e) => {
       error!("Failed to modify playlist: {:?}", e);
@@ -90,4 +95,41 @@ async fn serve_playlist(
   };
 
   (StatusCode::OK, modified_playlist)
+}
+
+async fn serve_segment(
+  Path((session_id, segment_path)): Path<(String, String)>,
+  Query(params): Query<HashMap<String, String>>,
+  State(config): State<Config>
+) -> impl IntoResponse {
+  info!("Serving segment: {} for session: {}", segment_path, session_id);
+
+  let origin_base = params.get("origin").map(|s| s.as_str()).unwrap_or(&config.origin_url);
+  
+  let segment_url = format!("{}/{}", origin_base, segment_path);
+
+  info!("fetching segment from origin: {}", segment_url);
+
+  let bytes = match reqwest::get(&segment_url).await {
+    Ok(response) => {
+      if response.status().is_success() {
+        match response.bytes().await {
+          Ok(bytes) => bytes,
+          Err(e) => {
+            error!("Failed to read segment bytes: {:?}", e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, vec![]);
+          }
+        }
+      } else {
+        error!("Origin server returned error: {}", response.status());
+        return (StatusCode::INTERNAL_SERVER_ERROR, vec![]);
+      }
+    }
+    Err(e) => {
+      error!("Failed to fetch segment from origin: {:?}", e);
+      return (StatusCode::INTERNAL_SERVER_ERROR, vec![]);
+    }
+  };
+
+  (StatusCode::OK, bytes.to_vec())
 }
