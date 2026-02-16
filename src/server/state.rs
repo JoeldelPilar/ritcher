@@ -27,6 +27,8 @@ impl AppState {
     /// Create a new AppState with the given configuration
     pub fn new(config: Config) -> Self {
         let http_client = Client::builder()
+            .timeout(Duration::from_secs(30))
+            .connect_timeout(Duration::from_secs(5))
             .pool_idle_timeout(Duration::from_secs(90))
             .pool_max_idle_per_host(10)
             .build()

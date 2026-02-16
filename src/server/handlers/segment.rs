@@ -40,6 +40,13 @@ pub async fn serve_segment(
     for attempt in 1..=max_attempts {
         match state.http_client.get(&segment_url).send().await {
             Ok(response) if response.status().is_success() => {
+                let content_type = response
+                    .headers()
+                    .get(header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("video/MP2T")
+                    .to_string();
+
                 let bytes = response.bytes().await?;
 
                 metrics::record_request("segment", 200);
@@ -47,7 +54,7 @@ pub async fn serve_segment(
 
                 return Ok((
                     StatusCode::OK,
-                    [(header::CONTENT_TYPE, "video/MP2T")],
+                    [(header::CONTENT_TYPE, content_type.as_str())],
                     Body::from(bytes.to_vec()),
                 )
                     .into_response());

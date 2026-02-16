@@ -6,7 +6,7 @@ async fn main() {
     // Setup logging
     tracing_subscriber::fmt::init();
 
-    info!("🚀 Starting Ritcher - Rust HLS Stitcher");
+    info!("Starting Ritcher - HLS SSAI Stitcher");
 
     let config = match config::Config::from_env() {
         Ok(c) => c,

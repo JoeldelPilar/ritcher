@@ -42,6 +42,13 @@ pub async fn serve_ad(
     for attempt in 1..=max_attempts {
         match state.http_client.get(&ad_url).send().await {
             Ok(response) if response.status().is_success() => {
+                let content_type = response
+                    .headers()
+                    .get(header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("video/MP2T")
+                    .to_string();
+
                 let bytes = response.bytes().await?;
                 info!("Ad segment {} fetched: {} bytes", ad_name, bytes.len());
 
@@ -50,7 +57,7 @@ pub async fn serve_ad(
 
                 return Ok((
                     StatusCode::OK,
-                    [(header::CONTENT_TYPE, "video/MP2T")],
+                    [(header::CONTENT_TYPE, content_type.as_str())],
                     Body::from(bytes.to_vec()),
                 )
                     .into_response());
