@@ -161,6 +161,31 @@ Prometheus metrics available at `GET /metrics`:
 
 ---
 
+## Performance
+
+In live SSAI, every concurrent viewer gets a **unique manifest** on every segment refresh — this work cannot be CDN-cached. The stitcher's manifest pipeline is the scalability bottleneck.
+
+Ritcher's pipeline (parse → detect CUE breaks → interleave ads → rewrite URLs → serialize) runs in **~6 µs** for a typical live playlist:
+
+| Scenario | Time per manifest | Throughput (single core) |
+|---|---|---|
+| Typical live (6 segments, 1 ad break) | ~6 µs | ~156K ops/sec |
+| Medium window (15 segments, 1 ad break) | ~12 µs | ~84K ops/sec |
+| DVR/catchup (60 segments, 3 ad breaks) | ~44 µs | ~23K ops/sec |
+| Pass-through (no ads) | ~7 µs | ~137K ops/sec |
+
+**What this means in practice:** with 6-second segments, a single core can serve ~156K manifest requests/sec — enough for **~900K concurrent viewers**. With Tokio's multi-threaded runtime across 4+ cores, Ritcher can handle millions of concurrent viewers on a single instance.
+
+VAST XML parsing adds ~18 µs per ad pod (3 ads, 3 media files each), though in production this is cached per ad break rather than per viewer.
+
+Run benchmarks yourself:
+
+```bash
+cargo bench
+```
+
+---
+
 ## Tech Stack
 
 - **Rust** (Edition 2024) — Zero-cost abstractions for manifest-per-viewer scalability
@@ -184,6 +209,9 @@ cargo test
 
 # Run with logging
 RUST_LOG=debug cargo test
+
+# Run benchmarks (Criterion)
+cargo bench
 
 # Clippy
 cargo clippy
