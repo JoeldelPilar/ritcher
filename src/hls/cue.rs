@@ -207,15 +207,17 @@ mod tests {
     #[test]
     fn test_detect_ad_breaks_simple() {
         // Use tag names as m3u8-rs stores them (without #EXT- prefix)
-        let mut playlist = MediaPlaylist::default();
-        playlist.segments = vec![
-            create_segment("seg0.ts"),
-            create_segment_with_tag("X-CUE-OUT", Some("30")),
-            create_segment("seg2.ts"),
-            create_segment("seg3.ts"),
-            create_segment_with_tag("X-CUE-IN", None),
-            create_segment("seg5.ts"),
-        ];
+        let playlist = MediaPlaylist {
+            segments: vec![
+                create_segment("seg0.ts"),
+                create_segment_with_tag("X-CUE-OUT", Some("30")),
+                create_segment("seg2.ts"),
+                create_segment("seg3.ts"),
+                create_segment_with_tag("X-CUE-IN", None),
+                create_segment("seg5.ts"),
+            ],
+            ..Default::default()
+        };
 
         let ad_breaks = detect_ad_breaks(&playlist);
 
@@ -232,17 +234,19 @@ mod tests {
 
     #[test]
     fn test_detect_multiple_ad_breaks() {
-        let mut playlist = MediaPlaylist::default();
-        playlist.segments = vec![
-            create_segment("seg0.ts"),
-            create_segment_with_tag("X-CUE-OUT", Some("30")),
-            create_segment("seg2.ts"),
-            create_segment_with_tag("X-CUE-IN", None),
-            create_segment("seg4.ts"),
-            create_segment_with_tag("X-CUE-OUT", Some("60")),
-            create_segment("seg6.ts"),
-            create_segment_with_tag("X-CUE-IN", None),
-        ];
+        let playlist = MediaPlaylist {
+            segments: vec![
+                create_segment("seg0.ts"),
+                create_segment_with_tag("X-CUE-OUT", Some("30")),
+                create_segment("seg2.ts"),
+                create_segment_with_tag("X-CUE-IN", None),
+                create_segment("seg4.ts"),
+                create_segment_with_tag("X-CUE-OUT", Some("60")),
+                create_segment("seg6.ts"),
+                create_segment_with_tag("X-CUE-IN", None),
+            ],
+            ..Default::default()
+        };
 
         let ad_breaks = detect_ad_breaks(&playlist);
 
@@ -257,12 +261,14 @@ mod tests {
 
     #[test]
     fn test_detect_unclosed_ad_break() {
-        let mut playlist = MediaPlaylist::default();
-        playlist.segments = vec![
-            create_segment("seg0.ts"),
-            create_segment_with_tag("X-CUE-OUT", Some("30")),
-            create_segment("seg2.ts"),
-        ];
+        let playlist = MediaPlaylist {
+            segments: vec![
+                create_segment("seg0.ts"),
+                create_segment_with_tag("X-CUE-OUT", Some("30")),
+                create_segment("seg2.ts"),
+            ],
+            ..Default::default()
+        };
 
         let ad_breaks = detect_ad_breaks(&playlist);
 
@@ -274,15 +280,17 @@ mod tests {
     #[test]
     fn test_detect_with_cue_out_cont() {
         // Simulate what m3u8-rs actually produces from a real playlist
-        let mut playlist = MediaPlaylist::default();
-        playlist.segments = vec![
-            create_segment("seg0.ts"),
-            create_segment_with_tag("X-CUE-OUT", Some("30")),
-            create_segment_with_tag("X-CUE-OUT-CONT", Some("10/30")),
-            create_segment_with_tag("X-CUE-OUT-CONT", Some("20/30")),
-            create_segment_with_tag("X-CUE-IN", None),
-            create_segment("seg5.ts"),
-        ];
+        let playlist = MediaPlaylist {
+            segments: vec![
+                create_segment("seg0.ts"),
+                create_segment_with_tag("X-CUE-OUT", Some("30")),
+                create_segment_with_tag("X-CUE-OUT-CONT", Some("10/30")),
+                create_segment_with_tag("X-CUE-OUT-CONT", Some("20/30")),
+                create_segment_with_tag("X-CUE-IN", None),
+                create_segment("seg5.ts"),
+            ],
+            ..Default::default()
+        };
 
         let ad_breaks = detect_ad_breaks(&playlist);
 

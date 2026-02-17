@@ -44,7 +44,7 @@ fn generate_playlist(segment_count: usize, ad_break_count: usize, ad_break_durat
         };
 
         for _ in 0..count {
-            lines.push(format!("#EXTINF:6.006,"));
+            lines.push("#EXTINF:6.006,".to_string());
             lines.push(format!(
                 "https://cdn.example.com/stream/segment_{}.ts",
                 seg_num
@@ -56,7 +56,7 @@ fn generate_playlist(segment_count: usize, ad_break_count: usize, ad_break_durat
         if break_idx < ad_break_count {
             // CUE-OUT
             lines.push(format!("#EXT-X-CUE-OUT:{}", ad_break_duration));
-            lines.push(format!("#EXTINF:6.006,"));
+            lines.push("#EXTINF:6.006,".to_string());
             lines.push(format!(
                 "https://cdn.example.com/stream/segment_{}.ts",
                 seg_num
@@ -70,7 +70,7 @@ fn generate_playlist(segment_count: usize, ad_break_count: usize, ad_break_durat
                     "#EXT-X-CUE-OUT-CONT:{}/{}",
                     elapsed, ad_break_duration
                 ));
-                lines.push(format!("#EXTINF:6.006,"));
+                lines.push("#EXTINF:6.006,".to_string());
                 lines.push(format!(
                     "https://cdn.example.com/stream/segment_{}.ts",
                     seg_num
@@ -80,7 +80,7 @@ fn generate_playlist(segment_count: usize, ad_break_count: usize, ad_break_durat
 
             // CUE-IN
             lines.push("#EXT-X-CUE-IN".to_string());
-            lines.push(format!("#EXTINF:6.006,"));
+            lines.push("#EXTINF:6.006,".to_string());
             lines.push(format!(
                 "https://cdn.example.com/stream/segment_{}.ts",
                 seg_num

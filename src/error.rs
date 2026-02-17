@@ -13,6 +13,9 @@ pub enum RitcherError {
     #[error("Failed to parse HLS playlist: {0}")]
     PlaylistParseError(String),
 
+    #[error("Failed to parse DASH MPD: {0}")]
+    MpdParseError(String),
+
     #[error("Failed to modify playlist: {0}")]
     PlaylistModifyError(String),
 
@@ -39,6 +42,10 @@ impl IntoResponse for RitcherError {
             }
             RitcherError::PlaylistParseError(ref e) => {
                 tracing::error!("Playlist parse error: {}", e);
+                (StatusCode::UNPROCESSABLE_ENTITY, self.to_string())
+            }
+            RitcherError::MpdParseError(ref e) => {
+                tracing::error!("MPD parse error: {}", e);
                 (StatusCode::UNPROCESSABLE_ENTITY, self.to_string())
             }
             RitcherError::PlaylistModifyError(ref e) => {

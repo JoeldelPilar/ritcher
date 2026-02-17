@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT60S" minBufferTime="PT2S" profiles="urn:mpeg:dash:profile:isoff-live:2011">
+  <Period id="1" duration="PT60S">
+    <BaseURL>https://origin.example.com/video/</BaseURL>
+    <AdaptationSet id="1" contentType="video" mimeType="video/mp4" segmentAlignment="true">
+      <Representation id="1080p" bandwidth="5000000" width="1920" height="1080" codecs="avc1.640028">
+        <BaseURL>1080p/</BaseURL>
+        <SegmentTemplate media="chunk-$Number%05d$.m4s" initialization="init-$RepresentationID$.mp4" timescale="90000" duration="900000" startNumber="1"/>
+      </Representation>
+      <Representation id="720p" bandwidth="2500000" width="1280" height="720" codecs="avc1.64001f">
+        <BaseURL>720p/</BaseURL>
+        <SegmentTemplate media="chunk-$Number%05d$.m4s" initialization="init-$RepresentationID$.mp4" timescale="90000" duration="900000" startNumber="1"/>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>

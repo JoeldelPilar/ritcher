@@ -16,6 +16,7 @@ thiserror = "2.0"
 dashmap = "6.1"
 tower-http = { version = "0.6", features = ["cors"] }
 quick-xml = "0.37"
+dash-mpd = { version = "0.17", default-features = false }
 metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
 

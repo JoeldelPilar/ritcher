@@ -165,14 +165,16 @@ mod tests {
 
     #[test]
     fn test_interleave_single_ad_break() {
-        let mut playlist = MediaPlaylist::default();
-        playlist.segments = vec![
-            create_test_segment("seg0.ts", 10.0),
-            create_test_segment("seg1.ts", 10.0),
-            create_test_segment("seg2.ts", 10.0),
-            create_test_segment("seg3.ts", 10.0),
-            create_test_segment("seg4.ts", 10.0),
-        ];
+        let playlist = MediaPlaylist {
+            segments: vec![
+                create_test_segment("seg0.ts", 10.0),
+                create_test_segment("seg1.ts", 10.0),
+                create_test_segment("seg2.ts", 10.0),
+                create_test_segment("seg3.ts", 10.0),
+                create_test_segment("seg4.ts", 10.0),
+            ],
+            ..Default::default()
+        };
 
         let ad_breaks = vec![AdBreak {
             start_index: 1,
@@ -213,15 +215,17 @@ mod tests {
 
     #[test]
     fn test_interleave_multiple_ad_breaks() {
-        let mut playlist = MediaPlaylist::default();
-        playlist.segments = vec![
-            create_test_segment("seg0.ts", 10.0),
-            create_test_segment("seg1.ts", 10.0),
-            create_test_segment("seg2.ts", 10.0),
-            create_test_segment("seg3.ts", 10.0),
-            create_test_segment("seg4.ts", 10.0),
-            create_test_segment("seg5.ts", 10.0),
-        ];
+        let playlist = MediaPlaylist {
+            segments: vec![
+                create_test_segment("seg0.ts", 10.0),
+                create_test_segment("seg1.ts", 10.0),
+                create_test_segment("seg2.ts", 10.0),
+                create_test_segment("seg3.ts", 10.0),
+                create_test_segment("seg4.ts", 10.0),
+                create_test_segment("seg5.ts", 10.0),
+            ],
+            ..Default::default()
+        };
 
         let ad_breaks = vec![
             AdBreak {
@@ -269,11 +273,13 @@ mod tests {
 
     #[test]
     fn test_interleave_no_ad_breaks() {
-        let mut playlist = MediaPlaylist::default();
-        playlist.segments = vec![
-            create_test_segment("seg0.ts", 10.0),
-            create_test_segment("seg1.ts", 10.0),
-        ];
+        let playlist = MediaPlaylist {
+            segments: vec![
+                create_test_segment("seg0.ts", 10.0),
+                create_test_segment("seg1.ts", 10.0),
+            ],
+            ..Default::default()
+        };
 
         let result = interleave_ads(
             playlist.clone(),

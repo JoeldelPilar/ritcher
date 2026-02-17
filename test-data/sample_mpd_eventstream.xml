@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:scte35="http://www.scte.org/schemas/35/2016" type="static" mediaPresentationDuration="PT90S" minBufferTime="PT2S" profiles="urn:mpeg:dash:profile:isoff-live:2011">
+  <Period id="content-1" duration="PT60S">
+    <BaseURL>https://example.com/content/</BaseURL>
+    <AdaptationSet id="1" contentType="video" mimeType="video/mp4" segmentAlignment="true">
+      <Representation id="video-480p" bandwidth="800000" width="854" height="480" codecs="avc1.64001f">
+        <SegmentTemplate media="segment-$Number$.m4s" initialization="init.mp4" timescale="1000" duration="10000" startNumber="1"/>
+      </Representation>
+    </AdaptationSet>
+    <EventStream schemeIdUri="urn:scte:scte35:2013:xml" timescale="1">
+      <Event presentationTime="50" duration="30" id="1">
+        <scte35:SpliceInfoSection>
+          <scte35:SpliceInsert spliceEventId="100" outOfNetworkIndicator="true">
+            <scte35:BreakDuration autoReturn="true" duration="30"/>
+          </scte35:SpliceInsert>
+        </scte35:SpliceInfoSection>
+      </Event>
+    </EventStream>
+  </Period>
+  <Period id="content-2" duration="PT30S">
+    <BaseURL>https://example.com/content/</BaseURL>
+    <AdaptationSet id="1" contentType="video" mimeType="video/mp4" segmentAlignment="true">
+      <Representation id="video-480p" bandwidth="800000" width="854" height="480" codecs="avc1.64001f">
+        <SegmentTemplate media="segment-$Number$.m4s" initialization="init.mp4" timescale="1000" duration="10000" startNumber="7"/>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>

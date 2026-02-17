@@ -11,6 +11,7 @@ use tracing::{error, info, warn};
 
 /// Ad creative resolved from VAST, cached per session
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct ResolvedCreative {
     /// URL to the ad creative (HLS playlist or MP4)
     url: String,
