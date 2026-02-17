@@ -2,7 +2,7 @@
 
 ## Open-Source Live SSAI Stitcher
 
-Ritcher is a high-performance HLS stitcher built in Rust for Server-Side Ad Insertion (SSAI). It sits between the origin CDN and the player, dynamically inserting ads into live and VOD HLS streams by manipulating manifests and proxying segments.
+Ritcher is a high-performance HLS/DASH stitcher built in Rust for Server-Side Ad Insertion (SSAI). It sits between the origin CDN and the player, dynamically inserting ads into live and VOD streams by manipulating manifests and proxying segments.
 
 Ritcher runs as a standalone Docker container deployable anywhere. It integrates well with the [Eyevinn Open Source Cloud](https://www.osaas.io) ecosystem — particularly as a downstream stitcher for [Channel Engine](https://github.com/Eyevinn/channel-engine) — but has no platform dependencies.
 
@@ -10,18 +10,27 @@ Ritcher runs as a standalone Docker container deployable anywhere. It integrates
 
 ## Features
 
+### HLS
 - **SCTE-35 CUE tag detection** — Detects `EXT-X-CUE-OUT`, `EXT-X-CUE-IN`, and `EXT-X-CUE-OUT-CONT` markers in HLS playlists
+- **Ad interleaving** — Replaces content segments in ad break windows with ad segments, including proper `EXT-X-DISCONTINUITY` tags
+- **Master playlist support** — Rewrites variant-stream URLs for multi-quality stitching
+- **Demo endpoint** — Synthetic HLS playlist with real Mux test segments and CUE markers for testing
+
+### DASH (in progress)
+- **DASH MPD parsing** — Parse and serialize DASH MPD manifests with hierarchical BaseURL resolution
+- **SCTE-35 EventStream detection** — Detects ad breaks from `urn:scte:scte35:2013:xml` EventStream elements
+- **URL rewriting** — Rewrites BaseURL and SegmentTemplate URLs at all MPD hierarchy levels through the stitcher proxy
+- **Period-based ad insertion** — *(stub — full implementation in progress)*
+
+### Shared
 - **VAST ad provider** — Fetches and parses VAST 2.0/3.0/4.0 XML from any ad server, with wrapper chain support
 - **Static ad provider** — Built-in provider for testing with pre-configured ad segments
 - **Slate management** — Fallback filler content when VAST returns no ads or fails
-- **Ad interleaving** — Replaces content segments in ad break windows with ad segments, including proper `EXT-X-DISCONTINUITY` tags
-- **Master playlist support** — Rewrites variant-stream URLs for multi-quality stitching
 - **Segment proxying** — High-performance proxying for content, ad, and slate segments with retry logic
 - **Session management** — Per-session stitching with automatic TTL-based cleanup
 - **Prometheus metrics** — `GET /metrics` endpoint with request counts, durations, VAST stats, and session gauges
 - **Ad conditioning** — Warning-level validation of ad creative compatibility (codec, resolution, MIME type)
 - **Error recovery** — Retry logic (1 retry, 500ms backoff) for VAST, origin, and ad segment fetches
-- **Demo endpoint** — Synthetic HLS playlist with real Mux test segments and CUE markers for testing
 - **JSON health check** — Structured diagnostics with version, session count, and uptime
 - **CORS support** — Permissive in dev mode, restrictive in production
 - **Docker ready** — Multi-stage Dockerfile for production deployment
@@ -34,12 +43,12 @@ Ritcher runs as a standalone Docker container deployable anywhere. It integrates
                     +------------------+
   Player  -------->|     Ritcher      |
                     |                  |
-                    |  1. Fetch playlist from origin
-                    |  2. Detect SCTE-35 CUE breaks
+                    |  1. Fetch manifest from origin
+                    |  2. Detect ad breaks (CUE/EventStream)
                     |  3. Fetch ads from VAST endpoint
                     |  4. Interleave ad segments
                     |  5. Rewrite URLs through proxy
-                    |  6. Serve modified playlist
+                    |  6. Serve modified manifest
                     +--------+---------+
                              |
               +--------------+--------------+
@@ -120,8 +129,9 @@ cargo run --release
 | `GET /health` | JSON health check (`{ status, version, active_sessions, uptime_seconds }`) |
 | `GET /metrics` | Prometheus metrics in text exposition format |
 | `GET /demo/playlist.m3u8` | Demo HLS playlist with CUE markers |
-| `GET /stitch/{session_id}/playlist.m3u8?origin={url}` | Stitched playlist with ad insertion |
-| `GET /stitch/{session_id}/segment/{*path}?origin={base}` | Proxied content segment |
+| `GET /stitch/{session_id}/playlist.m3u8?origin={url}` | Stitched HLS playlist with ad insertion |
+| `GET /stitch/{session_id}/manifest.mpd?origin={url}` | Stitched DASH manifest with ad insertion *(in progress)* |
+| `GET /stitch/{session_id}/segment/{*path}?origin={base}` | Proxied content segment (HLS/DASH) |
 | `GET /stitch/{session_id}/ad/{ad_name}` | Proxied ad segment |
 
 ---
@@ -192,6 +202,7 @@ cargo bench
 - **Axum 0.8** — Async HTTP server
 - **Tokio** — Async runtime
 - **m3u8-rs 6.0** — HLS playlist parsing
+- **dash-mpd** — DASH MPD parsing and serialization
 - **quick-xml** — VAST XML parsing
 - **reqwest** — HTTP client with connection pooling
 - **DashMap** — Lock-free concurrent session storage
@@ -204,7 +215,7 @@ cargo bench
 ## Testing
 
 ```bash
-# Run all tests (46 tests)
+# Run all tests (65 tests)
 cargo test
 
 # Run with logging
@@ -241,9 +252,14 @@ cargo clippy
 
 ### Phase 2: DASH Support
 
-- [ ] DASH MPD parsing and URL rewriting
-- [ ] Period-based ad insertion
-- [ ] CMAF segment support
+- [x] DASH MPD parsing and serialization
+- [x] Hierarchical BaseURL resolution (MPD/Period/AdaptationSet/Representation)
+- [x] SegmentTemplate URL rewriting through stitcher proxy
+- [x] SCTE-35 EventStream ad break detection
+- [x] Duration/timing validation with DoS prevention
+- [ ] Period-based ad insertion (interleaver)
+- [ ] DASH manifest handler and routes
+- [ ] DASH demo endpoint
 
 ### Phase 3: Advanced
 
@@ -256,7 +272,7 @@ cargo clippy
 
 ## Why Ritcher?
 
-The SSAI market is growing at 20.3% CAGR toward $14.5B by 2033, yet **no production-ready open-source live SSAI stitcher exists**. Ritcher fills that gap with Rust performance for the CPU-bound work of generating unique manifests per viewer. It works with any VAST-compatible ad server and any HLS origin — deploy it on [Eyevinn Open Source Cloud](https://www.osaas.io) for a turnkey setup with Channel Engine, or run it standalone anywhere Docker runs.
+The SSAI market is growing at 20.3% CAGR toward $14.5B by 2033, yet **no production-ready open-source live SSAI stitcher exists**. Ritcher fills that gap with Rust performance for the CPU-bound work of generating unique manifests per viewer. It works with any VAST-compatible ad server and any HLS/DASH origin — deploy it on [Eyevinn Open Source Cloud](https://www.osaas.io) for a turnkey setup with Channel Engine, or run it standalone anywhere Docker runs.
 
 ---
 
