@@ -16,11 +16,12 @@ Ritcher runs as a standalone Docker container deployable anywhere. It integrates
 - **Master playlist support** — Rewrites variant-stream URLs for multi-quality stitching
 - **Demo endpoint** — Synthetic HLS playlist with real Mux test segments and CUE markers for testing
 
-### DASH (in progress)
+### DASH
 - **DASH MPD parsing** — Parse and serialize DASH MPD manifests with hierarchical BaseURL resolution
 - **SCTE-35 EventStream detection** — Detects ad breaks from `urn:scte:scte35:2013:xml` EventStream elements
 - **URL rewriting** — Rewrites BaseURL and SegmentTemplate URLs at all MPD hierarchy levels through the stitcher proxy
-- **Period-based ad insertion** — *(stub — full implementation in progress)*
+- **Period-based ad insertion** — Inserts ad Periods with SegmentList after detected ad break signals
+- **Demo endpoint** — Synthetic DASH manifest with SCTE-35 EventStream for testing
 
 ### Shared
 - **VAST ad provider** — Fetches and parses VAST 2.0/3.0/4.0 XML from any ad server, with wrapper chain support
@@ -129,8 +130,9 @@ cargo run --release
 | `GET /health` | JSON health check (`{ status, version, active_sessions, uptime_seconds }`) |
 | `GET /metrics` | Prometheus metrics in text exposition format |
 | `GET /demo/playlist.m3u8` | Demo HLS playlist with CUE markers |
+| `GET /demo/manifest.mpd` | Demo DASH manifest with SCTE-35 EventStream |
 | `GET /stitch/{session_id}/playlist.m3u8?origin={url}` | Stitched HLS playlist with ad insertion |
-| `GET /stitch/{session_id}/manifest.mpd?origin={url}` | Stitched DASH manifest with ad insertion *(in progress)* |
+| `GET /stitch/{session_id}/manifest.mpd?origin={url}` | Stitched DASH manifest with ad insertion |
 | `GET /stitch/{session_id}/segment/{*path}?origin={base}` | Proxied content segment (HLS/DASH) |
 | `GET /stitch/{session_id}/ad/{ad_name}` | Proxied ad segment |
 
@@ -215,7 +217,7 @@ cargo bench
 ## Testing
 
 ```bash
-# Run all tests (65 tests)
+# Run all tests (69 tests)
 cargo test
 
 # Run with logging
@@ -257,9 +259,9 @@ cargo clippy
 - [x] SegmentTemplate URL rewriting through stitcher proxy
 - [x] SCTE-35 EventStream ad break detection
 - [x] Duration/timing validation with DoS prevention
-- [ ] Period-based ad insertion (interleaver)
-- [ ] DASH manifest handler and routes
-- [ ] DASH demo endpoint
+- [x] Period-based ad insertion (interleaver)
+- [x] DASH manifest handler and routes
+- [x] DASH demo endpoint
 
 ### Phase 3: Advanced
 
