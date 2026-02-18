@@ -60,15 +60,23 @@ pub async fn start(config: Config) -> Result<(), Box<dyn std::error::Error>> {
                 move || handlers::metrics::serve_metrics(handle)
             }),
         )
-        // Demo endpoint: synthetic playlist with CUE markers for testing
+        // Demo endpoints: synthetic playlist/manifest with ad signals for testing
         .route(
             "/demo/playlist.m3u8",
             get(handlers::demo::serve_demo_playlist),
+        )
+        .route(
+            "/demo/manifest.mpd",
+            get(handlers::demo::serve_demo_manifest),
         )
         // Stitcher endpoints
         .route(
             "/stitch/{session_id}/playlist.m3u8",
             get(handlers::playlist::serve_playlist),
+        )
+        .route(
+            "/stitch/{session_id}/manifest.mpd",
+            get(handlers::manifest::serve_manifest),
         )
         .route(
             "/stitch/{session_id}/segment/{*segment_path}",
