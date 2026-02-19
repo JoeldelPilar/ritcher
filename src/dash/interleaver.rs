@@ -179,14 +179,17 @@ mod tests {
             AdSegment {
                 uri: "ad1.ts".to_string(),
                 duration: 10.0,
+                tracking: None,
             },
             AdSegment {
                 uri: "ad2.ts".to_string(),
                 duration: 10.0,
+                tracking: None,
             },
             AdSegment {
                 uri: "ad3.ts".to_string(),
                 duration: 10.0,
+                tracking: None,
             },
         ]];
 
@@ -243,15 +246,18 @@ mod tests {
             vec![AdSegment {
                 uri: "ad1.ts".to_string(),
                 duration: 15.0,
+                tracking: None,
             }],
             vec![
                 AdSegment {
                     uri: "ad2.ts".to_string(),
                     duration: 10.0,
+                    tracking: None,
                 },
                 AdSegment {
                     uri: "ad3.ts".to_string(),
                     duration: 10.0,
+                    tracking: None,
                 },
             ],
         ];
@@ -297,6 +303,7 @@ mod tests {
         let ad_segments = vec![vec![AdSegment {
             uri: "ad.ts".to_string(),
             duration: 30.0,
+            tracking: None,
         }]];
 
         let result = interleave_ads_mpd(mpd, &ad_breaks, &ad_segments, "test", "http://test");
@@ -325,10 +332,12 @@ mod tests {
             AdSegment {
                 uri: "ad1.ts".to_string(),
                 duration: 10.0,
+                tracking: None,
             },
             AdSegment {
                 uri: "ad2.ts".to_string(),
                 duration: 10.0,
+                tracking: None,
             },
         ]];
 

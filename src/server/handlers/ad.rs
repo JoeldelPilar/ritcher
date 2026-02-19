@@ -1,4 +1,4 @@
-use crate::{error::Result, metrics, server::state::AppState};
+use crate::{ad::tracking, error::Result, metrics, server::state::AppState};
 use axum::{
     body::Body,
     extract::{Path, State},
@@ -22,10 +22,10 @@ pub async fn serve_ad(
     let start = Instant::now();
     info!("Serving ad: {} for session: {}", ad_name, session_id);
 
-    // Resolve ad segment identifier to actual source URL via the provider
-    let ad_url = state
+    // Resolve ad segment with tracking context
+    let resolved = state
         .ad_provider
-        .resolve_segment_url(&ad_name)
+        .resolve_segment_with_tracking(&ad_name, &session_id)
         .ok_or_else(|| {
             crate::error::RitcherError::InternalError(format!(
                 "Failed to resolve ad segment URL for: {}",
@@ -33,6 +33,29 @@ pub async fn serve_ad(
             ))
         })?;
 
+    // Fire tracking beacons (non-blocking) if present
+    if let Some(tracking) = &resolved.tracking {
+        // Fire impressions on first segment
+        if tracking.segment_index == 0 {
+            tracking::fire_impressions(state.http_client.clone(), &tracking.impression_urls);
+        }
+
+        // Fire quartile events
+        let events = tracking::events_for_segment(
+            tracking.segment_index,
+            tracking.total_segments,
+            &tracking.tracking_events,
+        );
+        for event in events {
+            tracking::fire_beacon(
+                state.http_client.clone(),
+                event.url.clone(),
+                event.event.clone(),
+            );
+        }
+    }
+
+    let ad_url = &resolved.url;
     info!("Fetching ad segment from: {}", ad_url);
 
     // Fetch ad segment with retry logic (1 retry, 500ms backoff)
@@ -40,7 +63,7 @@ pub async fn serve_ad(
     let mut last_error = None;
 
     for attempt in 1..=max_attempts {
-        match state.http_client.get(&ad_url).send().await {
+        match state.http_client.get(ad_url).send().await {
             Ok(response) if response.status().is_success() => {
                 let content_type = response
                     .headers()
@@ -85,6 +108,13 @@ pub async fn serve_ad(
             warn!("Retrying ad segment fetch in 500ms...");
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
+    }
+
+    // Fire error beacon if tracking metadata is present
+    if let Some(tracking) = &resolved.tracking
+        && let Some(error_url) = &tracking.error_url
+    {
+        tracking::fire_error(state.http_client.clone(), error_url);
     }
 
     metrics::record_request("ad", 502);

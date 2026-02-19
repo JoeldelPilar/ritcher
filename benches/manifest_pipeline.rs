@@ -129,6 +129,7 @@ fn generate_ad_segments(duration: f32, segment_duration: f32) -> Vec<AdSegment> 
         .map(|i| AdSegment {
             uri: format!("ad-segment-{}.ts", i),
             duration: segment_duration,
+            tracking: None,
         })
         .collect()
 }

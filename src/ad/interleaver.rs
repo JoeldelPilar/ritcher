@@ -181,10 +181,12 @@ mod tests {
             AdSegment {
                 uri: "ad1.ts".to_string(),
                 duration: 15.0,
+                tracking: None,
             },
             AdSegment {
                 uri: "ad2.ts".to_string(),
                 duration: 15.0,
+                tracking: None,
             },
         ]];
 
@@ -239,10 +241,12 @@ mod tests {
             vec![AdSegment {
                 uri: "ad1.ts".to_string(),
                 duration: 15.0,
+                tracking: None,
             }],
             vec![AdSegment {
                 uri: "ad2.ts".to_string(),
                 duration: 15.0,
+                tracking: None,
             }],
         ];
 

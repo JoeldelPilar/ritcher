@@ -1,3 +1,4 @@
+use crate::ad::vast::TrackingEvent;
 use tracing::info;
 
 /// Represents a single ad segment
@@ -7,6 +8,47 @@ pub struct AdSegment {
     pub uri: String,
     /// Duration of the segment in seconds
     pub duration: f32,
+    /// Tracking metadata (only present for VAST-sourced ads)
+    pub tracking: Option<AdTrackingInfo>,
+}
+
+/// Tracking metadata for a single ad creative
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AdTrackingInfo {
+    /// Impression URLs to fire when this ad first starts
+    pub impression_urls: Vec<String>,
+    /// Quartile/progress tracking events
+    pub tracking_events: Vec<TrackingEvent>,
+    /// Error URL to fire on failures
+    pub error_url: Option<String>,
+    /// Total number of segments in this ad (for quartile calculation)
+    pub total_segments: usize,
+    /// Index of this segment within the ad
+    pub segment_index: usize,
+}
+
+/// Resolved segment with optional tracking context
+#[derive(Debug, Clone)]
+pub struct ResolvedSegment {
+    /// URL to the ad segment source
+    pub url: String,
+    /// Tracking context (if available and not yet fired)
+    pub tracking: Option<SegmentTrackingContext>,
+}
+
+/// Tracking context for a resolved segment
+#[derive(Debug, Clone)]
+pub struct SegmentTrackingContext {
+    /// Impression URLs to fire
+    pub impression_urls: Vec<String>,
+    /// Tracking events to fire based on quartile progress
+    pub tracking_events: Vec<TrackingEvent>,
+    /// Error URL to fire on failures
+    pub error_url: Option<String>,
+    /// Total segments in this ad
+    pub total_segments: usize,
+    /// Index of this segment
+    pub segment_index: usize,
 }
 
 /// Trait for ad content providers
@@ -37,6 +79,29 @@ pub trait AdProvider: Send + Sync {
     /// # Returns
     /// Full URL to the ad segment, or None if the ad_name is invalid
     fn resolve_segment_url(&self, ad_name: &str) -> Option<String>;
+
+    /// Resolve segment URL and return tracking context (if available)
+    ///
+    /// Default implementation calls resolve_segment_url and returns no tracking info.
+    /// VAST provider overrides this to return tracking metadata on first access.
+    ///
+    /// # Arguments
+    /// * `ad_name` - Ad segment identifier
+    /// * `session_id` - Session ID
+    ///
+    /// # Returns
+    /// ResolvedSegment with URL and optional tracking context
+    fn resolve_segment_with_tracking(
+        &self,
+        ad_name: &str,
+        _session_id: &str,
+    ) -> Option<ResolvedSegment> {
+        self.resolve_segment_url(ad_name)
+            .map(|url| ResolvedSegment {
+                url,
+                tracking: None,
+            })
+    }
 }
 
 /// Static ad provider that returns a fixed set of ad segments
@@ -113,6 +178,7 @@ impl AdProvider for StaticAdProvider {
                 // In production, this would be different ad creatives
                 uri: format!("{}/ad-segment-{}.ts", self.ad_source_url, i),
                 duration: self.segment_duration,
+                tracking: None,
             })
             .collect();
 
@@ -149,6 +215,7 @@ mod tests {
         assert_eq!(segments.len(), 3);
         assert_eq!(segments[0].duration, 10.0);
         assert_eq!(segments[0].uri, "https://ads.example.com/ad-segment-0.ts");
+        assert_eq!(segments[0].tracking, None);
         assert_eq!(segments[1].uri, "https://ads.example.com/ad-segment-1.ts");
         assert_eq!(segments[2].uri, "https://ads.example.com/ad-segment-2.ts");
     }

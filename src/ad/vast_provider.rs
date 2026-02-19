@@ -1,15 +1,35 @@
 use crate::ad::conditioning;
-use crate::ad::provider::{AdProvider, AdSegment};
+use crate::ad::provider::{
+    AdProvider, AdSegment, AdTrackingInfo, ResolvedSegment, SegmentTrackingContext,
+};
 use crate::ad::slate::SlateProvider;
-use crate::ad::vast::{self, VastAdType};
+use crate::ad::vast::{self, TrackingEvent, VastAdType};
 use crate::metrics;
 use dashmap::DashMap;
 use reqwest::Client;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{error, info, warn};
 
-/// Ad creative resolved from VAST, cached per session
+/// Ad creative resolved from VAST (before caching)
+#[derive(Debug, Clone)]
+struct ResolvedVastCreative {
+    /// URL to the ad creative (HLS playlist or MP4)
+    url: String,
+    /// Duration in seconds
+    duration: f32,
+    /// Whether this is an HLS stream (vs progressive MP4)
+    is_hls: bool,
+    /// Impression URLs to fire
+    impression_urls: Vec<String>,
+    /// Tracking events
+    tracking_events: Vec<TrackingEvent>,
+    /// Error URL
+    error_url: Option<String>,
+}
+
+/// Ad creative cached per session with tracking state
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 struct ResolvedCreative {
@@ -19,6 +39,18 @@ struct ResolvedCreative {
     duration: f32,
     /// Whether this is an HLS stream (vs progressive MP4)
     is_hls: bool,
+    /// Impression URLs to fire
+    impression_urls: Vec<String>,
+    /// Tracking events
+    tracking_events: Vec<TrackingEvent>,
+    /// Error URL
+    error_url: Option<String>,
+    /// Total segments in this ad
+    total_segments: usize,
+    /// Index of this segment
+    segment_index: usize,
+    /// Events already fired (for deduplication)
+    fired_events: HashSet<String>,
 }
 
 /// VAST-based ad provider that fetches ads from a VAST endpoint
@@ -86,12 +118,16 @@ impl VastAdProvider {
     /// Uses `block_in_place` to run async HTTP requests within the sync
     /// AdProvider trait methods. This is safe because Axum uses a multi-threaded
     /// runtime and `block_in_place` only blocks the current thread.
+    ///
+    /// Accumulates wrapper tracking data through the chain.
     fn fetch_vast(
         &self,
         url: &str,
         depth: u32,
         session_id: &str,
-    ) -> Option<Vec<(String, f32, bool)>> {
+        wrapper_impressions: &[String],
+        wrapper_tracking: &[TrackingEvent],
+    ) -> Option<Vec<ResolvedVastCreative>> {
         if depth > self.max_wrapper_depth {
             warn!(
                 "VAST wrapper chain exceeded max depth ({})",
@@ -164,15 +200,40 @@ impl VastAdProvider {
                             conditioning::check_creative(media_file, session_id);
 
                             let is_hls = media_file.mime_type == "application/x-mpegURL";
-                            creatives.push((media_file.url.clone(), linear.duration, is_hls));
+
+                            // Merge wrapper tracking with inline tracking
+                            let mut impression_urls = wrapper_impressions.to_vec();
+                            impression_urls.extend(inline.impression_urls.clone());
+
+                            let mut tracking_events = wrapper_tracking.to_vec();
+                            tracking_events.extend(linear.tracking_events.clone());
+
+                            creatives.push(ResolvedVastCreative {
+                                url: media_file.url.clone(),
+                                duration: linear.duration,
+                                is_hls,
+                                impression_urls,
+                                tracking_events,
+                                error_url: inline.error_url.clone(),
+                            });
                         }
                     }
                 }
                 VastAdType::Wrapper(wrapper) => {
-                    // Follow wrapper chain recursively
-                    if let Some(mut wrapped_creatives) =
-                        self.fetch_vast(&wrapper.ad_tag_uri, depth + 1, session_id)
-                    {
+                    // Accumulate wrapper tracking and follow chain
+                    let mut merged_impressions = wrapper_impressions.to_vec();
+                    merged_impressions.extend(wrapper.impression_urls.clone());
+
+                    let mut merged_tracking = wrapper_tracking.to_vec();
+                    merged_tracking.extend(wrapper.tracking_events.clone());
+
+                    if let Some(mut wrapped_creatives) = self.fetch_vast(
+                        &wrapper.ad_tag_uri,
+                        depth + 1,
+                        session_id,
+                        &merged_impressions,
+                        &merged_tracking,
+                    ) {
                         creatives.append(&mut wrapped_creatives);
                     }
                 }
@@ -227,7 +288,7 @@ impl AdProvider for VastAdProvider {
             session_id, duration, url
         );
 
-        let creatives = match self.fetch_vast(&url, 0, session_id) {
+        let creatives = match self.fetch_vast(&url, 0, session_id, &[], &[]) {
             Some(c) if !c.is_empty() => {
                 metrics::record_vast_request("success");
                 c
@@ -271,23 +332,37 @@ impl AdProvider for VastAdProvider {
         // Build ad segments and cache them for resolve_segment_url
         let mut segments = Vec::new();
         let break_idx = 0; // TODO: track break index per session
+        let total_segments = creatives.len();
 
-        for (seg_idx, (url, creative_duration, is_hls)) in creatives.iter().enumerate() {
+        for (seg_idx, creative) in creatives.iter().enumerate() {
             let ad_name = format!("break-{}-seg-{}.ts", break_idx, seg_idx);
 
-            // Cache the resolved creative for later URL resolution
+            // Cache the resolved creative with tracking metadata
             self.ad_cache.insert(
                 Self::cache_key(session_id, &ad_name),
                 ResolvedCreative {
-                    url: url.clone(),
-                    duration: *creative_duration,
-                    is_hls: *is_hls,
+                    url: creative.url.clone(),
+                    duration: creative.duration,
+                    is_hls: creative.is_hls,
+                    impression_urls: creative.impression_urls.clone(),
+                    tracking_events: creative.tracking_events.clone(),
+                    error_url: creative.error_url.clone(),
+                    total_segments,
+                    segment_index: seg_idx,
+                    fired_events: HashSet::new(),
                 },
             );
 
             segments.push(AdSegment {
                 uri: ad_name,
-                duration: *creative_duration,
+                duration: creative.duration,
+                tracking: Some(AdTrackingInfo {
+                    impression_urls: creative.impression_urls.clone(),
+                    tracking_events: creative.tracking_events.clone(),
+                    error_url: creative.error_url.clone(),
+                    total_segments,
+                    segment_index: seg_idx,
+                }),
             });
         }
 
@@ -320,6 +395,52 @@ impl AdProvider for VastAdProvider {
 
         warn!("VastAdProvider: No cached creative found for {}", ad_name);
         None
+    }
+
+    fn resolve_segment_with_tracking(
+        &self,
+        ad_name: &str,
+        session_id: &str,
+    ) -> Option<ResolvedSegment> {
+        // Slate segments have no tracking
+        if ad_name.starts_with("slate-seg-") {
+            if let Some(slate) = &self.slate {
+                return slate
+                    .resolve_segment_url(ad_name)
+                    .map(|url| ResolvedSegment {
+                        url,
+                        tracking: None,
+                    });
+            }
+            return None;
+        }
+
+        let cache_key = Self::cache_key(session_id, ad_name);
+        if let Some(mut entry) = self.ad_cache.get_mut(&cache_key) {
+            // Check if this segment has been visited (deduplication)
+            let tracking = if !entry.fired_events.contains("visited") {
+                // Mark as visited
+                entry.fired_events.insert("visited".to_string());
+                Some(SegmentTrackingContext {
+                    impression_urls: entry.impression_urls.clone(),
+                    tracking_events: entry.tracking_events.clone(),
+                    error_url: entry.error_url.clone(),
+                    total_segments: entry.total_segments,
+                    segment_index: entry.segment_index,
+                })
+            } else {
+                // Already served, don't fire tracking again
+                None
+            };
+
+            Some(ResolvedSegment {
+                url: entry.url.clone(),
+                tracking,
+            })
+        } else {
+            warn!("VastAdProvider: No cached creative found for {}", ad_name);
+            None
+        }
     }
 }
 
