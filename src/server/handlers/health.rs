@@ -1,5 +1,5 @@
 use crate::server::state::AppState;
-use axum::{extract::State, response::IntoResponse, Json};
+use axum::{Json, extract::State, response::IntoResponse};
 use serde::Serialize;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");

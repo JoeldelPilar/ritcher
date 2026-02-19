@@ -61,13 +61,8 @@ pub fn interleave_ads(
             );
 
             // Add discontinuity before first ad segment
-            let mut first_ad_segment = create_media_segment_from_ad(
-                &ad_segments[0],
-                session_id,
-                base_url,
-                break_idx,
-                0,
-            );
+            let mut first_ad_segment =
+                create_media_segment_from_ad(&ad_segments[0], session_id, base_url, break_idx, 0);
             first_ad_segment.discontinuity = true;
             new_segments.push(first_ad_segment);
 

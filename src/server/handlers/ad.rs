@@ -2,7 +2,7 @@ use crate::{error::Result, metrics, server::state::AppState};
 use axum::{
     body::Body,
     extract::{Path, State},
-    http::{header, StatusCode},
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
 use std::time::{Duration, Instant};

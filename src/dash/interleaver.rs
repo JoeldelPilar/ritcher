@@ -274,7 +274,8 @@ mod tests {
         let ad_breaks = vec![];
         let ad_segments = vec![];
 
-        let result = interleave_ads_mpd(mpd.clone(), &ad_breaks, &ad_segments, "test", "http://test");
+        let result =
+            interleave_ads_mpd(mpd.clone(), &ad_breaks, &ad_segments, "test", "http://test");
 
         // Should return unchanged MPD
         assert_eq!(result.periods.len(), mpd.periods.len());
@@ -371,7 +372,8 @@ mod tests {
 
         let ad_segments = vec![vec![]]; // Empty ad segment list
 
-        let result = interleave_ads_mpd(mpd.clone(), &ad_breaks, &ad_segments, "test", "http://test");
+        let result =
+            interleave_ads_mpd(mpd.clone(), &ad_breaks, &ad_segments, "test", "http://test");
 
         // Should return unchanged MPD (empty ad segments skipped)
         assert_eq!(result.periods.len(), mpd.periods.len());

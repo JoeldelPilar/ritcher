@@ -46,10 +46,7 @@ impl AppState {
                     .expect("VAST_ENDPOINT is required when AD_PROVIDER_TYPE=vast");
                 info!("Ad provider: VAST (endpoint: {})", endpoint);
 
-                let mut provider = VastAdProvider::new(
-                    endpoint.to_string(),
-                    http_client.clone(),
-                );
+                let mut provider = VastAdProvider::new(endpoint.to_string(), http_client.clone());
 
                 // Configure slate fallback if SLATE_URL is set
                 if let Some(slate_url) = &config.slate_url {

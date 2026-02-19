@@ -173,10 +173,7 @@ mod tests {
 
     #[test]
     fn test_parse_cue_out_with_duration_key() {
-        assert_eq!(
-            parse_cue_out("X-CUE-OUT", Some("DURATION=30")),
-            Some(30.0)
-        );
+        assert_eq!(parse_cue_out("X-CUE-OUT", Some("DURATION=30")), Some(30.0));
         assert_eq!(
             parse_cue_out("X-CUE-OUT", Some("DURATION=45.5")),
             Some(45.5)

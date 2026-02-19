@@ -2,24 +2,17 @@ pub mod handlers;
 pub mod state;
 
 use crate::config::Config;
-use axum::{routing::get, Router};
+use axum::{Router, routing::get};
 use metrics_exporter_prometheus::PrometheusBuilder;
 use state::AppState;
 use tower_http::cors::CorsLayer;
 use tracing::{error, info};
 
-/// Start the Axum HTTP server
-pub async fn start(config: Config) -> Result<(), Box<dyn std::error::Error>> {
-    let port = config.port;
-    let base_url = config.base_url.clone();
-
-    // Install Prometheus metrics recorder
-    let prometheus_handle = PrometheusBuilder::new()
-        .install_recorder()
-        .expect("Failed to install Prometheus recorder");
-    info!("Prometheus metrics recorder installed");
-
-    // Create shared application state
+/// Build the Axum router with all routes and shared state
+///
+/// Extracted for testability — E2E tests use this to start a server
+/// without the Prometheus recorder and startup logging.
+pub fn build_router(config: Config) -> Router {
     let state = AppState::new(config);
 
     // Spawn background task for session cleanup (prevents memory leaks)
@@ -28,38 +21,15 @@ pub async fn start(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
         loop {
             interval.tick().await;
-            let before = cleanup_sessions.session_count();
             cleanup_sessions.cleanup_expired();
-            let after = cleanup_sessions.session_count();
-            if before != after {
-                info!(
-                    "Session cleanup: removed {} expired sessions ({} active)",
-                    before - after,
-                    after
-                );
-            }
-            // Update session gauge metric
-            crate::metrics::set_active_sessions(after);
         }
     });
 
-    // CORS: always permissive — Ritcher serves HLS playlists and segments
-    // that must be accessible from any web player origin (HLS.js, video.js, etc.)
-    info!("CORS: Permissive mode (required for HLS player access)");
     let cors = CorsLayer::very_permissive();
 
-    // Build router with all routes
-    let app = Router::new()
+    Router::new()
         .route("/", get(handlers::health::health_check))
         .route("/health", get(handlers::health::health_check))
-        // Prometheus metrics endpoint
-        .route(
-            "/metrics",
-            get({
-                let handle = prometheus_handle.clone();
-                move || handlers::metrics::serve_metrics(handle)
-            }),
-        )
         // Demo endpoints: synthetic playlist/manifest with ad signals for testing
         .route(
             "/demo/playlist.m3u8",
@@ -87,14 +57,40 @@ pub async fn start(config: Config) -> Result<(), Box<dyn std::error::Error>> {
             get(handlers::ad::serve_ad),
         )
         .layer(cors)
-        .with_state(state);
+        .with_state(state)
+}
+
+/// Start the Axum HTTP server
+pub async fn start(config: Config) -> Result<(), Box<dyn std::error::Error>> {
+    let port = config.port;
+    let base_url = config.base_url.clone();
+
+    // Install Prometheus metrics recorder
+    let prometheus_handle = PrometheusBuilder::new()
+        .install_recorder()
+        .expect("Failed to install Prometheus recorder");
+    info!("Prometheus metrics recorder installed");
+
+    // Build the application router
+    let app = build_router(config)
+        // Prometheus metrics endpoint (only in production start, not in E2E tests)
+        .route(
+            "/metrics",
+            get({
+                let handle = prometheus_handle.clone();
+                move || handlers::metrics::serve_metrics(handle)
+            }),
+        );
 
     // Bind TCP listener
     let addr = format!("0.0.0.0:{}", port);
     let listener = match tokio::net::TcpListener::bind(addr.as_str()).await {
         Ok(listener) => listener,
         Err(e) => {
-            error!("Failed to bind to {}: {}. Is port {} already in use?", addr, e, port);
+            error!(
+                "Failed to bind to {}: {}. Is port {} already in use?",
+                addr, e, port
+            );
             return Err(e.into());
         }
     };

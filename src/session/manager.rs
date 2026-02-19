@@ -85,10 +85,8 @@ mod tests {
     #[test]
     fn test_session_creation() {
         let manager = SessionManager::new(Duration::from_secs(300));
-        let session = manager.get_or_create(
-            "test123".to_string(),
-            "https://example.com".to_string(),
-        );
+        let session =
+            manager.get_or_create("test123".to_string(), "https://example.com".to_string());
 
         assert_eq!(session.session_id, "test123");
         assert_eq!(session.origin_url, "https://example.com");
@@ -98,10 +96,8 @@ mod tests {
     #[test]
     fn test_session_touch() {
         let manager = SessionManager::new(Duration::from_secs(300));
-        let session = manager.get_or_create(
-            "test456".to_string(),
-            "https://example.com".to_string(),
-        );
+        let session =
+            manager.get_or_create("test456".to_string(), "https://example.com".to_string());
 
         let initial_time = session.last_accessed;
         std::thread::sleep(Duration::from_millis(10));

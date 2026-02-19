@@ -87,9 +87,8 @@ impl Config {
         };
 
         // Static ad source URL: defaults to test ad stream
-        let ad_source_url = env::var("AD_SOURCE_URL").unwrap_or_else(|_| {
-            "https://hls.src.tedm.io/content/ts_h264_480p_1s".to_string()
-        });
+        let ad_source_url = env::var("AD_SOURCE_URL")
+            .unwrap_or_else(|_| "https://hls.src.tedm.io/content/ts_h264_480p_1s".to_string());
 
         // Static ad segment duration: defaults to 1 second
         let ad_segment_duration = env::var("AD_SEGMENT_DURATION")
