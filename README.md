@@ -1,5 +1,7 @@
 # Ritcher
 
+[![CI](https://github.com/JoeldelPilar/ritcher/actions/workflows/ci.yml/badge.svg)](https://github.com/JoeldelPilar/ritcher/actions/workflows/ci.yml)
+
 ## Open-Source Live SSAI Stitcher
 
 Ritcher is a high-performance HLS/DASH stitcher built in Rust for Server-Side Ad Insertion (SSAI). It sits between the origin CDN and the player, dynamically inserting ads into live and VOD streams by manipulating manifests and proxying segments.
@@ -217,8 +219,14 @@ cargo bench
 ## Testing
 
 ```bash
-# Run all tests (69 tests)
+# Run all tests (74 tests: 69 unit + 5 E2E)
 cargo test
+
+# Run only unit tests
+cargo test --lib
+
+# Run only E2E tests
+cargo test --test e2e
 
 # Run with logging
 RUST_LOG=debug cargo test
@@ -227,7 +235,7 @@ RUST_LOG=debug cargo test
 cargo bench
 
 # Clippy
-cargo clippy
+cargo clippy -- -D warnings
 ```
 
 ---
