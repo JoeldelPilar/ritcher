@@ -129,15 +129,11 @@ fn bench_parse_vast_inline(c: &mut Criterion) {
     for ad_count in [1, 3, 5, 10] {
         let xml = generate_vast_inline(ad_count, 3);
 
-        group.bench_with_input(
-            BenchmarkId::new("ads", ad_count),
-            &xml,
-            |b, input| {
-                b.iter(|| {
-                    vast::parse_vast(black_box(input)).unwrap();
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("ads", ad_count), &xml, |b, input| {
+            b.iter(|| {
+                vast::parse_vast(black_box(input)).unwrap();
+            });
+        });
     }
 
     group.finish();
@@ -227,7 +223,10 @@ fn bench_parse_vast_realistic_pod(c: &mut Criterion) {
     let xml_size = xml.len();
 
     c.bench_with_input(
-        BenchmarkId::new("parse_vast_realistic", format!("3ads_3mf_{}bytes", xml_size)),
+        BenchmarkId::new(
+            "parse_vast_realistic",
+            format!("3ads_3mf_{}bytes", xml_size),
+        ),
         &xml,
         |b, input| {
             b.iter(|| {

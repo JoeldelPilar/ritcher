@@ -17,7 +17,11 @@ use ritcher::hls::parser;
 ///
 /// Simulates a live sliding window with configurable segment count and ad breaks.
 /// Ad breaks use real SCTE-35 CUE-OUT/CUE-OUT-CONT/CUE-IN tag patterns.
-fn generate_playlist(segment_count: usize, ad_break_count: usize, ad_break_duration: f32) -> String {
+fn generate_playlist(
+    segment_count: usize,
+    ad_break_count: usize,
+    ad_break_duration: f32,
+) -> String {
     let mut lines = vec![
         "#EXTM3U".to_string(),
         "#EXT-X-VERSION:3".to_string(),
@@ -164,15 +168,11 @@ fn bench_detect_cue_breaks(c: &mut Criterion) {
             _ => panic!("Expected MediaPlaylist"),
         };
 
-        group.bench_with_input(
-            BenchmarkId::new("ad_breaks", label),
-            &media,
-            |b, input| {
-                b.iter(|| {
-                    cue::detect_ad_breaks(black_box(input));
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("ad_breaks", label), &media, |b, input| {
+            b.iter(|| {
+                cue::detect_ad_breaks(black_box(input));
+            });
+        });
     }
 
     group.finish();

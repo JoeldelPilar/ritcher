@@ -442,9 +442,7 @@ fn read_text(reader: &mut Reader<&[u8]>, end_tag: &str) -> Result<String> {
                 text.push_str(&e.unescape().unwrap_or_default());
             }
             Ok(Event::CData(e)) => {
-                text.push_str(
-                    std::str::from_utf8(&e).unwrap_or_default(),
-                );
+                text.push_str(std::str::from_utf8(&e).unwrap_or_default());
             }
             Ok(Event::End(ref e)) if e.name().as_ref() == end_tag_bytes => break,
             Ok(Event::Eof) => break,

@@ -2,17 +2,10 @@ use crate::ad::vast::MediaFile;
 use tracing::warn;
 
 /// Known HLS-compatible MIME types for ad creatives
-const HLS_MIME_TYPES: &[&str] = &[
-    "application/x-mpegURL",
-    "application/vnd.apple.mpegurl",
-];
+const HLS_MIME_TYPES: &[&str] = &["application/x-mpegURL", "application/vnd.apple.mpegurl"];
 
 /// Known progressive video MIME types
-const PROGRESSIVE_MIME_TYPES: &[&str] = &[
-    "video/mp4",
-    "video/webm",
-    "video/3gpp",
-];
+const PROGRESSIVE_MIME_TYPES: &[&str] = &["video/mp4", "video/webm", "video/3gpp"];
 
 /// Validate ad creative compatibility and log warnings
 ///
@@ -53,8 +46,14 @@ pub fn check_creative(media_file: &MediaFile, session_id: &str) {
         // Common broadcast resolutions
         let is_standard = matches!(
             (media_file.width, media_file.height),
-            (1920, 1080) | (1280, 720) | (854, 480) | (640, 360) | (426, 240)
-                | (3840, 2160) | (960, 540) | (768, 432)
+            (1920, 1080)
+                | (1280, 720)
+                | (854, 480)
+                | (640, 360)
+                | (426, 240)
+                | (3840, 2160)
+                | (960, 540)
+                | (768, 432)
         );
 
         if !is_standard {

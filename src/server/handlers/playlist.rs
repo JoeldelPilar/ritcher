@@ -1,5 +1,5 @@
 use crate::{
-    ad::{interleaver, AdProvider},
+    ad::{AdProvider, interleaver},
     error::Result,
     hls::{cue, parser},
     metrics,
@@ -7,7 +7,7 @@ use crate::{
 };
 use axum::{
     extract::{Path, Query, State},
-    http::{header, StatusCode},
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
 use m3u8_rs::Playlist;
@@ -33,10 +33,15 @@ pub async fn serve_playlist(
     info!("Fetching playlist from origin: {}", origin_url);
 
     // Fetch playlist from origin using shared HTTP client
-    let response = state.http_client.get(origin_url).send().await.map_err(|e| {
-        metrics::record_origin_error();
-        crate::error::RitcherError::OriginFetchError(e)
-    })?;
+    let response = state
+        .http_client
+        .get(origin_url)
+        .send()
+        .await
+        .map_err(|e| {
+            metrics::record_origin_error();
+            crate::error::RitcherError::OriginFetchError(e)
+        })?;
 
     if !response.status().is_success() {
         metrics::record_origin_error();

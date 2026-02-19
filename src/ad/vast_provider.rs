@@ -110,11 +110,7 @@ impl VastAdProvider {
             tokio::runtime::Handle::current().block_on(async {
                 let max_attempts = 2;
                 for attempt in 1..=max_attempts {
-                    let response = client
-                        .get(&url)
-                        .timeout(timeout)
-                        .send()
-                        .await;
+                    let response = client.get(&url).timeout(timeout).send().await;
 
                     match response {
                         Ok(resp) if resp.status().is_success() => {
@@ -123,7 +119,9 @@ impl VastAdProvider {
                         Ok(resp) => {
                             error!(
                                 "VAST endpoint returned status {} (attempt {}/{})",
-                                resp.status(), attempt, max_attempts
+                                resp.status(),
+                                attempt,
+                                max_attempts
                             );
                         }
                         Err(e) => {
@@ -161,18 +159,13 @@ impl VastAdProvider {
                         if let Some(linear) = &creative.linear
                             && let Some(media_file) =
                                 vast::select_best_media_file(&linear.media_files)
-                            {
-                                // Ad conditioning: check creative compatibility (warnings only)
-                                conditioning::check_creative(media_file, session_id);
+                        {
+                            // Ad conditioning: check creative compatibility (warnings only)
+                            conditioning::check_creative(media_file, session_id);
 
-                                let is_hls =
-                                    media_file.mime_type == "application/x-mpegURL";
-                                creatives.push((
-                                    media_file.url.clone(),
-                                    linear.duration,
-                                    is_hls,
-                                ));
-                            }
+                            let is_hls = media_file.mime_type == "application/x-mpegURL";
+                            creatives.push((media_file.url.clone(), linear.duration, is_hls));
+                        }
                     }
                 }
                 VastAdType::Wrapper(wrapper) => {

@@ -6,7 +6,7 @@ use crate::{
 };
 use axum::{
     extract::{Path, Query, State},
-    http::{header, StatusCode},
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
 use std::collections::HashMap;
@@ -31,10 +31,15 @@ pub async fn serve_manifest(
     info!("Fetching MPD from origin: {}", origin_url);
 
     // Fetch MPD from origin using shared HTTP client
-    let response = state.http_client.get(origin_url).send().await.map_err(|e| {
-        metrics::record_origin_error();
-        crate::error::RitcherError::OriginFetchError(e)
-    })?;
+    let response = state
+        .http_client
+        .get(origin_url)
+        .send()
+        .await
+        .map_err(|e| {
+            metrics::record_origin_error();
+            crate::error::RitcherError::OriginFetchError(e)
+        })?;
 
     if !response.status().is_success() {
         metrics::record_origin_error();
@@ -66,7 +71,11 @@ pub async fn serve_manifest(
         // Step 2: Get ad segments for each break
         let ad_segments_per_break: Vec<_> = ad_breaks
             .iter()
-            .map(|ad_break| state.ad_provider.get_ad_segments(ad_break.duration as f32, &session_id))
+            .map(|ad_break| {
+                state
+                    .ad_provider
+                    .get_ad_segments(ad_break.duration as f32, &session_id)
+            })
             .collect();
 
         // Step 3: Interleave ad Periods into MPD

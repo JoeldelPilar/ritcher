@@ -98,22 +98,12 @@ pub fn rewrite_dash_urls(
 
                 // Rewrite SegmentTemplate URLs if present
                 if let Some(ref mut segment_template) = representation.SegmentTemplate {
-                    rewrite_segment_template(
-                        segment_template,
-                        session_id,
-                        base_url,
-                        &repr_origin,
-                    )?;
+                    rewrite_segment_template(segment_template, session_id, base_url, &repr_origin)?;
                 }
 
                 // Also check AdaptationSet-level SegmentTemplate
                 if let Some(ref mut segment_template) = adaptation_set.SegmentTemplate {
-                    rewrite_segment_template(
-                        segment_template,
-                        session_id,
-                        base_url,
-                        &repr_origin,
-                    )?;
+                    rewrite_segment_template(segment_template, session_id, base_url, &repr_origin)?;
                 }
             }
         }
@@ -267,8 +257,13 @@ mod tests {
 </MPD>"#;
 
         let mut mpd = parse_mpd(xml).expect("Failed to parse MPD");
-        rewrite_dash_urls(&mut mpd, "test", "http://stitcher", "https://origin.example.com")
-            .expect("Failed to rewrite URLs");
+        rewrite_dash_urls(
+            &mut mpd,
+            "test",
+            "http://stitcher",
+            "https://origin.example.com",
+        )
+        .expect("Failed to rewrite URLs");
 
         // Verify both AdaptationSets were rewritten
         assert_eq!(mpd.periods[0].adaptations.len(), 2);
@@ -277,11 +272,19 @@ mod tests {
         let video_repr = &mpd.periods[0].adaptations[0].representations[0];
         if let Some(ref template) = video_repr.SegmentTemplate {
             assert!(
-                template.media.as_ref().unwrap().contains("/stitch/test/segment/video-"),
+                template
+                    .media
+                    .as_ref()
+                    .unwrap()
+                    .contains("/stitch/test/segment/video-"),
                 "Video media template not rewritten"
             );
             assert!(
-                template.initialization.as_ref().unwrap().contains("/stitch/test/segment/video-init"),
+                template
+                    .initialization
+                    .as_ref()
+                    .unwrap()
+                    .contains("/stitch/test/segment/video-init"),
                 "Video init template not rewritten"
             );
         }
@@ -290,11 +293,19 @@ mod tests {
         let audio_repr = &mpd.periods[0].adaptations[1].representations[0];
         if let Some(ref template) = audio_repr.SegmentTemplate {
             assert!(
-                template.media.as_ref().unwrap().contains("/stitch/test/segment/audio-"),
+                template
+                    .media
+                    .as_ref()
+                    .unwrap()
+                    .contains("/stitch/test/segment/audio-"),
                 "Audio media template not rewritten"
             );
             assert!(
-                template.initialization.as_ref().unwrap().contains("/stitch/test/segment/audio-init"),
+                template
+                    .initialization
+                    .as_ref()
+                    .unwrap()
+                    .contains("/stitch/test/segment/audio-init"),
                 "Audio init template not rewritten"
             );
         }

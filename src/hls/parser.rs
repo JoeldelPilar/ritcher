@@ -1,5 +1,5 @@
 use crate::error::{Result, RitcherError};
-use m3u8_rs::{parse_playlist_res, Playlist};
+use m3u8_rs::{Playlist, parse_playlist_res};
 use tracing::info;
 
 /// Parse HLS playlist from string content
@@ -49,10 +49,8 @@ pub fn rewrite_content_urls(
 
             if segment.uri.starts_with("http") {
                 // Absolute URL: derive origin from the segment's own URL
-                let (seg_origin, segment_name) = segment
-                    .uri
-                    .rsplit_once('/')
-                    .unwrap_or(("", &segment.uri));
+                let (seg_origin, segment_name) =
+                    segment.uri.rsplit_once('/').unwrap_or(("", &segment.uri));
 
                 segment.uri = format!(
                     "{}/stitch/{}/segment/{}?origin={}",
@@ -86,10 +84,7 @@ pub fn rewrite_master_urls(
     base_url: &str,
     origin_base: &str,
 ) -> Result<Playlist> {
-    info!(
-        "Rewriting master playlist URLs for session: {}",
-        session_id
-    );
+    info!("Rewriting master playlist URLs for session: {}", session_id);
 
     if let Playlist::MasterPlaylist(ref mut master) = playlist {
         for variant in master.variants.iter_mut() {
@@ -108,10 +103,7 @@ pub fn rewrite_master_urls(
                 base_url, session_id, absolute_url
             );
 
-            info!(
-                "Rewrote variant: {} → {}",
-                original_uri, variant.uri
-            );
+            info!("Rewrote variant: {} → {}", original_uri, variant.uri);
         }
 
         // Also rewrite alternative media URIs (audio, subtitle renditions)
@@ -130,10 +122,7 @@ pub fn rewrite_master_urls(
                     base_url, session_id, absolute_url
                 );
 
-                info!(
-                    "Rewrote alternative media: {} → {}",
-                    original_uri, uri
-                );
+                info!("Rewrote alternative media: {} → {}", original_uri, uri);
             }
         }
 
@@ -150,9 +139,9 @@ pub fn rewrite_master_urls(
 /// Serialize playlist to string
 pub fn serialize_playlist(playlist: Playlist) -> Result<String> {
     let mut output = Vec::new();
-    playlist
-        .write_to(&mut output)
-        .map_err(|e| RitcherError::PlaylistModifyError(format!("Failed to write playlist: {}", e)))?;
+    playlist.write_to(&mut output).map_err(|e| {
+        RitcherError::PlaylistModifyError(format!("Failed to write playlist: {}", e))
+    })?;
 
     String::from_utf8(output).map_err(|e| {
         RitcherError::ConversionError(format!("Failed to convert playlist to UTF-8: {}", e))
