@@ -17,6 +17,8 @@ pub const VAST_REQUESTS: &str = "ritcher_vast_requests_total";
 pub const SLATE_FALLBACKS: &str = "ritcher_slate_fallbacks_total";
 /// Origin fetch errors
 pub const ORIGIN_FETCH_ERRORS: &str = "ritcher_origin_fetch_errors_total";
+/// Tracking beacons fired by event type and result
+pub const TRACKING_BEACONS: &str = "ritcher_tracking_beacons_total";
 
 // ── Recording helpers ───────────────────────────────────────────────────
 
@@ -55,4 +57,10 @@ pub fn record_slate_fallback() {
 /// Record an origin fetch error
 pub fn record_origin_error() {
     counter!(ORIGIN_FETCH_ERRORS).increment(1);
+}
+
+/// Record a tracking beacon event
+pub fn record_tracking_event(event: &str, result: &str) {
+    counter!(TRACKING_BEACONS, "event" => event.to_string(), "result" => result.to_string())
+        .increment(1);
 }

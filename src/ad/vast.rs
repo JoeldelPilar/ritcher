@@ -70,7 +70,7 @@ pub struct MediaFile {
 }
 
 /// Tracking event for ad playback reporting
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TrackingEvent {
     pub event: String,
     pub url: String,

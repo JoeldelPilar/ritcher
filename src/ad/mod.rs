@@ -2,6 +2,7 @@ pub mod conditioning;
 pub mod interleaver;
 pub mod provider;
 pub mod slate;
+pub mod tracking;
 pub mod vast;
 pub mod vast_provider;
 

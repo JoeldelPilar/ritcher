@@ -50,6 +50,7 @@ impl SlateProvider {
             .map(|i| AdSegment {
                 uri: format!("slate-seg-{}.ts", i),
                 duration: self.segment_duration,
+                tracking: None,
             })
             .collect()
     }
@@ -97,6 +98,7 @@ mod tests {
         for (i, seg) in segments.iter().enumerate() {
             assert_eq!(seg.uri, format!("slate-seg-{}.ts", i));
             assert_eq!(seg.duration, 2.0);
+            assert_eq!(seg.tracking, None);
         }
     }
 
