@@ -1,6 +1,8 @@
-# Ritcher
+<div align="center">
+  <img src="assets/images/ritcher-logo.png" alt="Ritcher — HLS & DASH Stitching for SSAI" width="100%">
 
-[![CI](https://github.com/JoeldelPilar/ritcher/actions/workflows/ci.yml/badge.svg)](https://github.com/JoeldelPilar/ritcher/actions/workflows/ci.yml)
+  [![CI](https://github.com/JoeldelPilar/ritcher/actions/workflows/ci.yml/badge.svg)](https://github.com/JoeldelPilar/ritcher/actions/workflows/ci.yml)
+</div>
 
 ## Open-Source Live SSAI Stitcher
 
