@@ -33,22 +33,7 @@ pub struct ResolvedSegment {
     /// URL to the ad segment source
     pub url: String,
     /// Tracking context (if available and not yet fired)
-    pub tracking: Option<SegmentTrackingContext>,
-}
-
-/// Tracking context for a resolved segment
-#[derive(Debug, Clone)]
-pub struct SegmentTrackingContext {
-    /// Impression URLs to fire
-    pub impression_urls: Vec<String>,
-    /// Tracking events to fire based on quartile progress
-    pub tracking_events: Vec<TrackingEvent>,
-    /// Error URL to fire on failures
-    pub error_url: Option<String>,
-    /// Total segments in this ad
-    pub total_segments: usize,
-    /// Index of this segment
-    pub segment_index: usize,
+    pub tracking: Option<AdTrackingInfo>,
 }
 
 /// Trait for ad content providers
