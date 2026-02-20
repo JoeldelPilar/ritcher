@@ -37,3 +37,6 @@ jobs:
 
       - name: Build release
         run: cargo build --release
+
+      - name: Security audit
+        run: cargo install cargo-audit --locked && cargo audit

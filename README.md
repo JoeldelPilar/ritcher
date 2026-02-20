@@ -34,6 +34,7 @@ Ritcher runs as a standalone Docker container deployable anywhere. It integrates
 - **Segment proxying** — High-performance proxying for content, ad, and slate segments with retry logic
 - **Session management** — Per-session stitching with automatic TTL-based cleanup
 - **Prometheus metrics** — `GET /metrics` endpoint with request counts, durations, VAST stats, and session gauges
+- **Ad tracking & beaconing** — VAST impression, quartile (start/firstQuartile/midpoint/thirdQuartile/complete), and error beacons fired server-side on segment delivery
 - **Ad conditioning** — Warning-level validation of ad creative compatibility (codec, resolution, MIME type)
 - **Error recovery** — Retry logic (1 retry, 500ms backoff) for VAST, origin, and ad segment fetches
 - **JSON health check** — Structured diagnostics with version, session count, and uptime
@@ -173,6 +174,7 @@ Prometheus metrics available at `GET /metrics`:
 | `ritcher_ad_breaks_detected` | Counter | Ad breaks detected across all requests |
 | `ritcher_vast_requests_total` | Counter | VAST requests by result (success/error/empty) |
 | `ritcher_slate_fallbacks_total` | Counter | Slate fallback activations |
+| `ritcher_tracking_beacons_total` | Counter | Tracking beacons by event and result |
 | `ritcher_origin_fetch_errors_total` | Counter | Origin fetch errors |
 
 ---
@@ -221,7 +223,7 @@ cargo bench
 ## Testing
 
 ```bash
-# Run all tests (74 tests: 69 unit + 5 E2E)
+# Run all tests (86 tests: 81 unit + 5 E2E)
 cargo test
 
 # Run only unit tests
@@ -277,7 +279,7 @@ cargo clippy -- -D warnings
 
 - [ ] Low-latency HLS (LL-HLS)
 - [ ] Server-Guided Ad Insertion (SGAI)
-- [ ] Ad tracking and beaconing
+- [x] Ad tracking and beaconing
 - [ ] Per-viewer manifest personalization
 
 ---

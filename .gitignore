@@ -1,4 +1,10 @@
 /target
 /.cursor
-test.te
 .env
+
+# macOS
+.DS_Store
+
+# Test artifacts
+ad-test.ts
+test.te

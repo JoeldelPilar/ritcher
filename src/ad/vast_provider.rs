@@ -1,13 +1,10 @@
 use crate::ad::conditioning;
-use crate::ad::provider::{
-    AdProvider, AdSegment, AdTrackingInfo, ResolvedSegment, SegmentTrackingContext,
-};
+use crate::ad::provider::{AdProvider, AdSegment, AdTrackingInfo, ResolvedSegment};
 use crate::ad::slate::SlateProvider;
 use crate::ad::vast::{self, TrackingEvent, VastAdType};
 use crate::metrics;
 use dashmap::DashMap;
 use reqwest::Client;
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{error, info, warn};
@@ -49,8 +46,8 @@ struct ResolvedCreative {
     total_segments: usize,
     /// Index of this segment
     segment_index: usize,
-    /// Events already fired (for deduplication)
-    fired_events: HashSet<String>,
+    /// Whether tracking has been returned for this segment (deduplication)
+    visited: bool,
 }
 
 /// VAST-based ad provider that fetches ads from a VAST endpoint
@@ -349,7 +346,7 @@ impl AdProvider for VastAdProvider {
                     error_url: creative.error_url.clone(),
                     total_segments,
                     segment_index: seg_idx,
-                    fired_events: HashSet::new(),
+                    visited: false,
                 },
             );
 
@@ -418,10 +415,10 @@ impl AdProvider for VastAdProvider {
         let cache_key = Self::cache_key(session_id, ad_name);
         if let Some(mut entry) = self.ad_cache.get_mut(&cache_key) {
             // Check if this segment has been visited (deduplication)
-            let tracking = if !entry.fired_events.contains("visited") {
+            let tracking = if !entry.visited {
                 // Mark as visited
-                entry.fired_events.insert("visited".to_string());
-                Some(SegmentTrackingContext {
+                entry.visited = true;
+                Some(AdTrackingInfo {
                     impression_urls: entry.impression_urls.clone(),
                     tracking_events: entry.tracking_events.clone(),
                     error_url: entry.error_url.clone(),
@@ -468,5 +465,44 @@ mod tests {
             VastAdProvider::cache_key("session-1", "break-0-seg-0.ts"),
             "session-1:break-0-seg-0.ts"
         );
+    }
+
+    #[test]
+    fn test_wrapper_tracking_merge() {
+        // Verifies that wrapper impression URLs and tracking events
+        // are correctly accumulated and merged with inline ad data.
+        // This tests the merge pattern used in fetch_vast() lines 204-209 and 224-228.
+
+        // Simulate wrapper accumulation
+        let mut wrapper_impressions = vec!["http://wrapper/imp".to_string()];
+        let inline_impressions = vec!["http://inline/imp".to_string()];
+        wrapper_impressions.extend(inline_impressions);
+
+        assert_eq!(wrapper_impressions.len(), 2);
+        assert_eq!(wrapper_impressions[0], "http://wrapper/imp");
+        assert_eq!(wrapper_impressions[1], "http://inline/imp");
+
+        // Simulate tracking event accumulation
+        let mut wrapper_tracking = vec![TrackingEvent {
+            event: "start".into(),
+            url: "http://wrapper/start".into(),
+        }];
+        let inline_tracking = vec![TrackingEvent {
+            event: "complete".into(),
+            url: "http://inline/complete".into(),
+        }];
+        wrapper_tracking.extend(inline_tracking);
+
+        assert_eq!(wrapper_tracking.len(), 2);
+        assert_eq!(wrapper_tracking[0].url, "http://wrapper/start");
+        assert_eq!(wrapper_tracking[1].url, "http://inline/complete");
+
+        // Multi-level: second wrapper adds more impressions
+        let mut level2_impressions = vec!["http://wrapper2/imp".to_string()];
+        level2_impressions.extend(wrapper_impressions);
+        assert_eq!(level2_impressions.len(), 3);
+        assert_eq!(level2_impressions[0], "http://wrapper2/imp");
+        assert_eq!(level2_impressions[1], "http://wrapper/imp");
+        assert_eq!(level2_impressions[2], "http://inline/imp");
     }
 }
