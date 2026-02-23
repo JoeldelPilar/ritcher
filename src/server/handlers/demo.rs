@@ -106,6 +106,11 @@ pub async fn serve_demo_manifest() -> Response {
         <SegmentTemplate media="url_$Number$/193039199_mp4_h264_aac_hd_7.ts" timescale="1" duration="10" startNumber="462"/>
       </Representation>
     </AdaptationSet>
+    <AdaptationSet id="2" contentType="audio" mimeType="audio/mp4" lang="en">
+      <Representation id="audio" bandwidth="128000" codecs="mp4a.40.2">
+        <SegmentTemplate media="url_$Number$/193039199_mp4_h264_aac_hd_7.ts" timescale="1" duration="10" startNumber="462"/>
+      </Representation>
+    </AdaptationSet>
     <EventStream schemeIdUri="urn:scte:scte35:2013:xml" timescale="1">
       <Event presentationTime="50" duration="30" id="ad-1">
         <scte35:SpliceInfoSection xmlns:scte35="http://www.scte.org/schemas/35/2016">
@@ -123,10 +128,15 @@ pub async fn serve_demo_manifest() -> Response {
         <SegmentTemplate media="url_$Number$/193039199_mp4_h264_aac_hd_7.ts" timescale="1" duration="10" startNumber="468"/>
       </Representation>
     </AdaptationSet>
+    <AdaptationSet id="2" contentType="audio" mimeType="audio/mp4" lang="en">
+      <Representation id="audio" bandwidth="128000" codecs="mp4a.40.2">
+        <SegmentTemplate media="url_$Number$/193039199_mp4_h264_aac_hd_7.ts" timescale="1" duration="10" startNumber="468"/>
+      </Representation>
+    </AdaptationSet>
   </Period>
 </MPD>"#;
 
-    info!("Demo manifest: 2 content periods, 1 SCTE-35 signal (30s ad break at 50s)");
+    info!("Demo manifest: 2 content periods (video+audio), 1 SCTE-35 signal (30s ad break at 50s)");
 
     (
         StatusCode::OK,

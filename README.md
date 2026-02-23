@@ -275,11 +275,16 @@ cargo clippy -- -D warnings
 - [x] DASH manifest handler and routes
 - [x] DASH demo endpoint
 
-### Phase 3: Advanced
+### Phase 3: Multi-Track & Session Hardening
+
+- [ ] Multi-track ad insertion (separate audio/video renditions with different segment lengths)
+- [ ] Distributed session store (Valkey/Redis for multi-instance consistency)
+- [x] Ad tracking and beaconing
+
+### Phase 4: Advanced
 
 - [ ] Low-latency HLS (LL-HLS)
 - [ ] Server-Guided Ad Insertion (SGAI)
-- [x] Ad tracking and beaconing
 - [ ] Per-viewer manifest personalization
 
 ---

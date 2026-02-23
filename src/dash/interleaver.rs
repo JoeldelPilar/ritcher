@@ -9,6 +9,11 @@ use tracing::{info, warn};
 /// Creates new Period elements with SegmentList-based ad content and inserts them
 /// after the Periods containing ad break signals (detected by DashAdBreak).
 ///
+/// Ad Periods mirror the content Period's AdaptationSet structure (video, audio, etc.)
+/// so that all tracks are present during ad breaks. Since ad creatives are typically
+/// muxed (containing both audio and video), the same SegmentList URLs are used for
+/// all AdaptationSets — the player demuxes the correct track.
+///
 /// # Arguments
 /// * `mpd` - The original MPD to modify
 /// * `ad_breaks` - Detected ad breaks from EventStream/SCTE-35
@@ -48,16 +53,30 @@ pub fn interleave_ads_mpd(
             continue;
         }
 
+        // Get content AdaptationSets from the signal Period to mirror in ad Period
+        let content_adaptations = mpd
+            .periods
+            .get(ad_break.period_index)
+            .map(|p| p.adaptations.as_slice())
+            .unwrap_or(&[]);
+
         info!(
-            "Inserting {} ad segments at Period {} (ad break {}/{})",
+            "Inserting {} ad segments at Period {} (ad break {}/{}, {} content AdaptationSets)",
             ad_segments.len(),
             ad_break.period_index,
             break_idx + 1,
-            ad_breaks.len()
+            ad_breaks.len(),
+            content_adaptations.len()
         );
 
-        // Create ad Period
-        let ad_period = create_ad_period(ad_segments, break_idx, session_id, base_url);
+        // Create ad Period mirroring content track structure
+        let ad_period = create_ad_period(
+            ad_segments,
+            break_idx,
+            session_id,
+            base_url,
+            content_adaptations,
+        );
 
         // Insert ad Period after the signal period
         let insert_position = ad_break.period_index + 1;
@@ -83,26 +102,33 @@ pub fn interleave_ads_mpd(
 
 /// Create a DASH Period containing ad content with SegmentList
 ///
-/// Builds: Period → AdaptationSet → Representation → SegmentList → Vec<SegmentURL>
+/// Mirrors the content Period's AdaptationSet structure so that all tracks
+/// (video, audio, etc.) are present in the ad Period. Since ad creatives are
+/// typically muxed, the same SegmentList URLs are shared across all tracks.
+///
+/// Falls back to a single video-only AdaptationSet when no content AdaptationSets
+/// are available (backward compatibility).
 ///
 /// # Arguments
 /// * `ad_segments` - Ad segments to include in this Period
 /// * `break_idx` - Index of this ad break (for ID generation)
 /// * `session_id` - Session ID for URL generation
 /// * `base_url` - Stitcher base URL for proxying
+/// * `content_adaptations` - AdaptationSets from the content Period to mirror
 ///
 /// # Returns
-/// A Period with ad content
+/// A Period with ad content matching the content track structure
 fn create_ad_period(
     ad_segments: &[AdSegment],
     break_idx: usize,
     session_id: &str,
     base_url: &str,
+    content_adaptations: &[AdaptationSet],
 ) -> Period {
     // Calculate total duration
     let total_duration: f64 = ad_segments.iter().map(|s| s.duration as f64).sum();
 
-    // Create SegmentURL entries for each ad segment
+    // Create SegmentURL entries for each ad segment (shared across all tracks)
     let segment_urls: Vec<SegmentURL> = ad_segments
         .iter()
         .enumerate()
@@ -115,33 +141,72 @@ fn create_ad_period(
         })
         .collect();
 
-    // Build SegmentList
-    let segment_list = SegmentList {
-        segment_urls,
-        ..Default::default()
-    };
+    // Mirror content AdaptationSets, or fall back to single video
+    let adaptations = if content_adaptations.is_empty() {
+        vec![create_fallback_video_adaptation_set(
+            break_idx,
+            segment_urls,
+        )]
+    } else {
+        content_adaptations
+            .iter()
+            .enumerate()
+            .map(|(as_idx, content_as)| {
+                let bw = content_as
+                    .representations
+                    .first()
+                    .and_then(|r| r.bandwidth)
+                    .unwrap_or(500_000);
 
-    // Build Representation
-    let representation = Representation {
-        id: Some(format!("ad-rep-{}", break_idx)),
-        bandwidth: Some(500_000), // Conservative bandwidth estimate for ads
-        SegmentList: Some(segment_list),
-        ..Default::default()
-    };
+                let representation = Representation {
+                    id: Some(format!("ad-rep-{}-{}", break_idx, as_idx)),
+                    bandwidth: Some(bw),
+                    SegmentList: Some(SegmentList {
+                        segment_urls: segment_urls.clone(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                };
 
-    // Build AdaptationSet
-    let adaptation_set = AdaptationSet {
-        contentType: Some("video".to_string()),
-        mimeType: Some("video/mp4".to_string()),
-        representations: vec![representation],
-        ..Default::default()
+                AdaptationSet {
+                    contentType: content_as.contentType.clone(),
+                    mimeType: content_as.mimeType.clone(),
+                    lang: content_as.lang.clone(),
+                    representations: vec![representation],
+                    ..Default::default()
+                }
+            })
+            .collect()
     };
 
     // Build Period
     Period {
         id: Some(format!("ad-{}", break_idx)),
         duration: Some(Duration::from_secs_f64(total_duration)),
-        adaptations: vec![adaptation_set],
+        adaptations,
+        ..Default::default()
+    }
+}
+
+/// Fallback: create a single video-only AdaptationSet (backward compatibility)
+fn create_fallback_video_adaptation_set(
+    break_idx: usize,
+    segment_urls: Vec<SegmentURL>,
+) -> AdaptationSet {
+    let representation = Representation {
+        id: Some(format!("ad-rep-{}", break_idx)),
+        bandwidth: Some(500_000),
+        SegmentList: Some(SegmentList {
+            segment_urls,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    AdaptationSet {
+        contentType: Some("video".to_string()),
+        mimeType: Some("video/mp4".to_string()),
+        representations: vec![representation],
         ..Default::default()
     }
 }
@@ -163,17 +228,47 @@ mod tests {
         mpd
     }
 
+    /// Create a test MPD where each Period has video + audio AdaptationSets
+    fn create_test_mpd_multi_track(count: usize) -> MPD {
+        let mut mpd = MPD::default();
+        for i in 0..count {
+            mpd.periods.push(Period {
+                id: Some(format!("content-{}", i)),
+                duration: Some(Duration::from_secs(60)),
+                adaptations: vec![
+                    AdaptationSet {
+                        contentType: Some("video".to_string()),
+                        mimeType: Some("video/mp4".to_string()),
+                        ..Default::default()
+                    },
+                    AdaptationSet {
+                        contentType: Some("audio".to_string()),
+                        mimeType: Some("audio/mp4".to_string()),
+                        lang: Some("en".to_string()),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            });
+        }
+        mpd
+    }
+
+    fn create_test_ad_break(period_index: usize, duration: f64) -> DashAdBreak {
+        DashAdBreak {
+            period_index,
+            period_id: Some(format!("content-{}", period_index)),
+            duration,
+            presentation_time: 0.0,
+            signal_type: DashSignalType::SpliceInsert,
+        }
+    }
+
     #[test]
     fn test_interleave_single_ad_break() {
         let mpd = create_test_mpd_with_periods(2);
 
-        let ad_breaks = vec![DashAdBreak {
-            period_index: 0,
-            period_id: Some("content-0".to_string()),
-            duration: 30.0,
-            presentation_time: 0.0,
-            signal_type: DashSignalType::SpliceInsert,
-        }];
+        let ad_breaks = vec![create_test_ad_break(0, 30.0)];
 
         let ad_segments = vec![vec![
             AdSegment {
@@ -208,6 +303,7 @@ mod tests {
         assert_eq!(result.periods[2].id, Some("content-1".to_string()));
 
         // Verify ad period has SegmentList with 3 segments
+        // (content-0 has no AdaptationSets, so fallback to single video)
         let ad_period = &result.periods[1];
         assert_eq!(ad_period.adaptations.len(), 1);
         let adaptation_set = &ad_period.adaptations[0];
@@ -225,22 +321,7 @@ mod tests {
     fn test_interleave_multiple_ad_breaks() {
         let mpd = create_test_mpd_with_periods(4);
 
-        let ad_breaks = vec![
-            DashAdBreak {
-                period_index: 0,
-                period_id: Some("content-0".to_string()),
-                duration: 15.0,
-                presentation_time: 0.0,
-                signal_type: DashSignalType::SpliceInsert,
-            },
-            DashAdBreak {
-                period_index: 2,
-                period_id: Some("content-2".to_string()),
-                duration: 20.0,
-                presentation_time: 0.0,
-                signal_type: DashSignalType::SpliceInsert,
-            },
-        ];
+        let ad_breaks = vec![create_test_ad_break(0, 15.0), create_test_ad_break(2, 20.0)];
 
         let ad_segments = vec![
             vec![AdSegment {
@@ -292,13 +373,7 @@ mod tests {
         let mpd = create_test_mpd_with_periods(3);
         let original_periods = mpd.periods.clone();
 
-        let ad_breaks = vec![DashAdBreak {
-            period_index: 1,
-            period_id: Some("content-1".to_string()),
-            duration: 30.0,
-            presentation_time: 0.0,
-            signal_type: DashSignalType::SpliceInsert,
-        }];
+        let ad_breaks = vec![create_test_ad_break(1, 30.0)];
 
         let ad_segments = vec![vec![AdSegment {
             uri: "ad.ts".to_string(),
@@ -320,13 +395,7 @@ mod tests {
     fn test_ad_period_segment_urls() {
         let mpd = create_test_mpd_with_periods(1);
 
-        let ad_breaks = vec![DashAdBreak {
-            period_index: 0,
-            period_id: Some("content-0".to_string()),
-            duration: 30.0,
-            presentation_time: 0.0,
-            signal_type: DashSignalType::SpliceInsert,
-        }];
+        let ad_breaks = vec![create_test_ad_break(0, 30.0)];
 
         let ad_segments = vec![vec![
             AdSegment {
@@ -371,13 +440,7 @@ mod tests {
     fn test_interleave_empty_ad_segments() {
         let mpd = create_test_mpd_with_periods(2);
 
-        let ad_breaks = vec![DashAdBreak {
-            period_index: 0,
-            period_id: Some("content-0".to_string()),
-            duration: 30.0,
-            presentation_time: 0.0,
-            signal_type: DashSignalType::SpliceInsert,
-        }];
+        let ad_breaks = vec![create_test_ad_break(0, 30.0)];
 
         let ad_segments = vec![vec![]]; // Empty ad segment list
 
@@ -386,5 +449,133 @@ mod tests {
 
         // Should return unchanged MPD (empty ad segments skipped)
         assert_eq!(result.periods.len(), mpd.periods.len());
+    }
+
+    // --- Multi-track tests ---
+
+    #[test]
+    fn test_ad_period_mirrors_video_and_audio_adaptation_sets() {
+        let mpd = create_test_mpd_multi_track(2);
+
+        let ad_breaks = vec![create_test_ad_break(0, 30.0)];
+        let ad_segments = vec![vec![AdSegment {
+            uri: "ad.ts".to_string(),
+            duration: 30.0,
+            tracking: None,
+        }]];
+
+        let result = interleave_ads_mpd(mpd, &ad_breaks, &ad_segments, "test", "http://test");
+
+        let ad_period = &result.periods[1];
+        assert_eq!(ad_period.id, Some("ad-0".to_string()));
+
+        // Ad Period should have 2 AdaptationSets mirroring content
+        assert_eq!(ad_period.adaptations.len(), 2);
+
+        // First: video
+        assert_eq!(
+            ad_period.adaptations[0].contentType,
+            Some("video".to_string())
+        );
+        assert_eq!(
+            ad_period.adaptations[0].mimeType,
+            Some("video/mp4".to_string())
+        );
+
+        // Second: audio
+        assert_eq!(
+            ad_period.adaptations[1].contentType,
+            Some("audio".to_string())
+        );
+        assert_eq!(
+            ad_period.adaptations[1].mimeType,
+            Some("audio/mp4".to_string())
+        );
+    }
+
+    #[test]
+    fn test_ad_period_preserves_lang_attribute() {
+        let mpd = create_test_mpd_multi_track(1);
+
+        let ad_breaks = vec![create_test_ad_break(0, 15.0)];
+        let ad_segments = vec![vec![AdSegment {
+            uri: "ad.ts".to_string(),
+            duration: 15.0,
+            tracking: None,
+        }]];
+
+        let result = interleave_ads_mpd(mpd, &ad_breaks, &ad_segments, "test", "http://test");
+
+        let ad_period = &result.periods[1];
+        let audio_as = &ad_period.adaptations[1];
+
+        assert_eq!(audio_as.lang, Some("en".to_string()));
+    }
+
+    #[test]
+    fn test_ad_period_fallback_when_no_content_adaptations() {
+        // Periods without AdaptationSets → fallback to single video
+        let mpd = create_test_mpd_with_periods(1);
+
+        let ad_breaks = vec![create_test_ad_break(0, 10.0)];
+        let ad_segments = vec![vec![AdSegment {
+            uri: "ad.ts".to_string(),
+            duration: 10.0,
+            tracking: None,
+        }]];
+
+        let result = interleave_ads_mpd(mpd, &ad_breaks, &ad_segments, "test", "http://test");
+
+        let ad_period = &result.periods[1];
+        assert_eq!(ad_period.adaptations.len(), 1);
+        assert_eq!(
+            ad_period.adaptations[0].contentType,
+            Some("video".to_string())
+        );
+    }
+
+    #[test]
+    fn test_ad_period_shared_segment_urls_across_tracks() {
+        let mpd = create_test_mpd_multi_track(1);
+
+        let ad_breaks = vec![create_test_ad_break(0, 20.0)];
+        let ad_segments = vec![vec![
+            AdSegment {
+                uri: "ad1.ts".to_string(),
+                duration: 10.0,
+                tracking: None,
+            },
+            AdSegment {
+                uri: "ad2.ts".to_string(),
+                duration: 10.0,
+                tracking: None,
+            },
+        ]];
+
+        let result = interleave_ads_mpd(mpd, &ad_breaks, &ad_segments, "test", "http://test");
+
+        let ad_period = &result.periods[1];
+
+        // Both AdaptationSets should have identical SegmentList URLs
+        let video_urls: Vec<_> = ad_period.adaptations[0].representations[0]
+            .SegmentList
+            .as_ref()
+            .unwrap()
+            .segment_urls
+            .iter()
+            .map(|u| u.media.as_ref().unwrap())
+            .collect();
+
+        let audio_urls: Vec<_> = ad_period.adaptations[1].representations[0]
+            .SegmentList
+            .as_ref()
+            .unwrap()
+            .segment_urls
+            .iter()
+            .map(|u| u.media.as_ref().unwrap())
+            .collect();
+
+        assert_eq!(video_urls, audio_urls);
+        assert_eq!(video_urls.len(), 2);
     }
 }

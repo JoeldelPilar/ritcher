@@ -1,5 +1,5 @@
 use crate::error::{Result, RitcherError};
-use m3u8_rs::{Playlist, parse_playlist_res};
+use m3u8_rs::{AlternativeMediaType, Playlist, parse_playlist_res};
 use tracing::info;
 
 /// Parse HLS playlist from string content
@@ -107,6 +107,7 @@ pub fn rewrite_master_urls(
         }
 
         // Also rewrite alternative media URIs (audio, subtitle renditions)
+        // Append &track= parameter so the playlist handler knows the track type
         for alt in master.alternatives.iter_mut() {
             if let Some(ref mut uri) = alt.uri {
                 let original_uri = uri.clone();
@@ -117,12 +118,23 @@ pub fn rewrite_master_urls(
                     format!("{}/{}", origin_base, uri)
                 };
 
+                let track_type = match alt.media_type {
+                    AlternativeMediaType::Audio => "audio",
+                    AlternativeMediaType::Subtitles | AlternativeMediaType::ClosedCaptions => {
+                        "subtitles"
+                    }
+                    _ => "video",
+                };
+
                 *uri = format!(
-                    "{}/stitch/{}/playlist.m3u8?origin={}",
-                    base_url, session_id, absolute_url
+                    "{}/stitch/{}/playlist.m3u8?origin={}&track={}",
+                    base_url, session_id, absolute_url, track_type
                 );
 
-                info!("Rewrote alternative media: {} → {}", original_uri, uri);
+                info!(
+                    "Rewrote alternative media ({}): {} → {}",
+                    track_type, original_uri, uri
+                );
             }
         }
 
@@ -151,7 +163,7 @@ pub fn serialize_playlist(playlist: Playlist) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use m3u8_rs::{AlternativeMedia, AlternativeMediaType, MasterPlaylist, VariantStream};
+    use m3u8_rs::{AlternativeMedia, MasterPlaylist, VariantStream};
 
     #[test]
     fn test_rewrite_master_urls_relative() {
@@ -251,7 +263,75 @@ mod tests {
         if let Playlist::MasterPlaylist(master) = result {
             assert_eq!(
                 master.alternatives[0].uri.as_deref().unwrap(),
-                "http://stitcher.example.com/stitch/session-1/playlist.m3u8?origin=http://cdn.example.com/stream/audio/en/playlist.m3u8"
+                "http://stitcher.example.com/stitch/session-1/playlist.m3u8?origin=http://cdn.example.com/stream/audio/en/playlist.m3u8&track=audio"
+            );
+        } else {
+            panic!("Expected MasterPlaylist");
+        }
+    }
+
+    #[test]
+    fn test_rewrite_master_urls_adds_track_param_for_subtitles() {
+        let playlist = Playlist::MasterPlaylist(MasterPlaylist {
+            variants: vec![VariantStream {
+                uri: "video/playlist.m3u8".to_string(),
+                bandwidth: 2_000_000,
+                ..Default::default()
+            }],
+            alternatives: vec![AlternativeMedia {
+                media_type: AlternativeMediaType::Subtitles,
+                uri: Some("subs/en/playlist.m3u8".to_string()),
+                group_id: "subs".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+
+        let result = rewrite_master_urls(
+            playlist,
+            "session-1",
+            "http://stitcher.example.com",
+            "http://cdn.example.com/stream",
+        )
+        .unwrap();
+
+        if let Playlist::MasterPlaylist(master) = result {
+            let uri = master.alternatives[0].uri.as_deref().unwrap();
+            assert!(
+                uri.ends_with("&track=subtitles"),
+                "Expected track=subtitles, got: {}",
+                uri
+            );
+        } else {
+            panic!("Expected MasterPlaylist");
+        }
+    }
+
+    #[test]
+    fn test_rewrite_master_urls_no_track_param_for_video_variants() {
+        let playlist = Playlist::MasterPlaylist(MasterPlaylist {
+            variants: vec![VariantStream {
+                uri: "720p/playlist.m3u8".to_string(),
+                bandwidth: 2_000_000,
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+
+        let result = rewrite_master_urls(
+            playlist,
+            "session-1",
+            "http://stitcher.example.com",
+            "http://cdn.example.com/stream",
+        )
+        .unwrap();
+
+        if let Playlist::MasterPlaylist(master) = result {
+            let uri = &master.variants[0].uri;
+            assert!(
+                !uri.contains("&track="),
+                "Video variants should not have track param: {}",
+                uri
             );
         } else {
             panic!("Expected MasterPlaylist");

@@ -63,6 +63,13 @@ pub async fn serve_playlist(
         .map(|(base, _)| base)
         .unwrap_or(origin_url);
 
+    // Determine track type from query params (set by master playlist rewrite for alternatives)
+    let track_type = match params.get("track").map(|s| s.as_str()) {
+        Some("audio") => "audio",
+        Some("subtitles") => "subtitles",
+        _ => "video",
+    };
+
     // Process playlist through the ad insertion pipeline
     let modified_playlist = process_playlist(
         playlist,
@@ -70,6 +77,7 @@ pub async fn serve_playlist(
         &state.config.base_url,
         origin_base,
         state.ad_provider.as_ref(),
+        track_type,
     )?;
 
     // Serialize to string
@@ -88,17 +96,30 @@ pub async fn serve_playlist(
 }
 
 /// Process playlist through the ad insertion pipeline
+///
+/// The `track_type` parameter indicates the media track type:
+/// - `"video"` — full ad insertion pipeline (default)
+/// - `"audio"` — ad insertion if CUE markers present (muxed ads contain audio),
+///   otherwise pass through unchanged
+/// - `"subtitles"` — skip ad insertion entirely, only rewrite URLs
 fn process_playlist(
     playlist: Playlist,
     session_id: &str,
     base_url: &str,
     origin_base: &str,
     ad_provider: &dyn AdProvider,
+    track_type: &str,
 ) -> Result<Playlist> {
     // Handle MasterPlaylist: rewrite variant-stream URLs through stitcher
     if matches!(&playlist, Playlist::MasterPlaylist(_)) {
         info!("Processing master playlist — rewriting variant URLs");
         return parser::rewrite_master_urls(playlist, session_id, base_url, origin_base);
+    }
+
+    // Subtitle/CC tracks: skip ad insertion, only rewrite content URLs
+    if track_type == "subtitles" {
+        info!("Subtitle track — skipping ad insertion");
+        return parser::rewrite_content_urls(playlist, session_id, base_url, origin_base);
     }
 
     // MediaPlaylist: full ad insertion pipeline
@@ -110,10 +131,16 @@ fn process_playlist(
     let ad_breaks = cue::detect_ad_breaks(&media_playlist);
 
     if !ad_breaks.is_empty() {
-        info!("Detected {} ad break(s)", ad_breaks.len());
+        info!(
+            "Detected {} ad break(s) for {} track",
+            ad_breaks.len(),
+            track_type
+        );
         metrics::record_ad_breaks(ad_breaks.len());
 
         // Step 2: Get ad segments for each break
+        // For audio tracks, the same muxed ad segments are used — the player
+        // demuxes the audio track from the muxed container
         let ad_segments_per_break: Vec<_> = ad_breaks
             .iter()
             .map(|ad_break| ad_provider.get_ad_segments(ad_break.duration, session_id))
@@ -127,6 +154,11 @@ fn process_playlist(
             session_id,
             base_url,
         );
+    } else if track_type == "audio" {
+        // Audio rendition without CUE markers: pass through without ad insertion.
+        // The muxed video ad segments already contain audio, but without CUE markers
+        // we cannot determine where to insert them in the audio timeline.
+        info!("Audio track has no CUE markers — passing through without ad insertion");
     } else {
         info!("No ad breaks detected in playlist");
     }
