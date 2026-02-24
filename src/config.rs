@@ -1,5 +1,12 @@
 use std::env;
 
+/// Session store type selection
+#[derive(Clone, Debug, PartialEq)]
+pub enum SessionStoreType {
+    Memory,
+    Valkey,
+}
+
 /// Ad provider selection
 #[derive(Clone, Debug, PartialEq)]
 pub enum AdProviderType {
@@ -28,6 +35,12 @@ pub struct Config {
     pub slate_url: Option<String>,
     /// Slate segment duration in seconds (default: 1.0)
     pub slate_segment_duration: f32,
+    /// Session store backend
+    pub session_store: SessionStoreType,
+    /// Valkey/Redis URL (used when session_store = Valkey)
+    pub valkey_url: Option<String>,
+    /// Session TTL in seconds (default: 300)
+    pub session_ttl_secs: u64,
 }
 
 impl Config {
@@ -105,6 +118,20 @@ impl Config {
             .parse()
             .unwrap_or(1.0);
 
+        let session_ttl_secs: u64 = env::var("SESSION_TTL_SECS")
+            .unwrap_or_else(|_| "300".to_string())
+            .parse()
+            .unwrap_or(300);
+        let session_store = match env::var("SESSION_STORE")
+            .unwrap_or_else(|_| "memory".to_string())
+            .to_lowercase()
+            .as_str()
+        {
+            "valkey" | "redis" => SessionStoreType::Valkey,
+            _ => SessionStoreType::Memory,
+        };
+        let valkey_url = env::var("VALKEY_URL").ok();
+
         Ok(Config {
             port,
             base_url,
@@ -116,6 +143,9 @@ impl Config {
             vast_endpoint,
             slate_url,
             slate_segment_duration,
+            session_store,
+            valkey_url,
+            session_ttl_secs,
         })
     }
 }

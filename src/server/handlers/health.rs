@@ -20,7 +20,7 @@ pub async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
     Json(HealthResponse {
         status: "ok",
         version: VERSION,
-        active_sessions: state.sessions.session_count(),
+        active_sessions: state.sessions.session_count().await,
         uptime_seconds: uptime,
     })
 }

@@ -12,8 +12,8 @@ use tracing::{error, info};
 ///
 /// Extracted for testability — E2E tests use this to start a server
 /// without the Prometheus recorder and startup logging.
-pub fn build_router(config: Config) -> Router {
-    let state = AppState::new(config);
+pub async fn build_router(config: Config) -> Router {
+    let state = AppState::new(config).await;
 
     // Spawn background task for session cleanup (prevents memory leaks)
     let cleanup_sessions = state.sessions.clone();
@@ -21,7 +21,7 @@ pub fn build_router(config: Config) -> Router {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
         loop {
             interval.tick().await;
-            cleanup_sessions.cleanup_expired();
+            cleanup_sessions.cleanup_expired().await;
         }
     });
 
@@ -73,6 +73,7 @@ pub async fn start(config: Config) -> Result<(), Box<dyn std::error::Error>> {
 
     // Build the application router
     let app = build_router(config)
+        .await
         // Prometheus metrics endpoint (only in production start, not in E2E tests)
         .route(
             "/metrics",
