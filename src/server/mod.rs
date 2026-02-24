@@ -56,6 +56,10 @@ pub async fn build_router(config: Config) -> Router {
             "/stitch/{session_id}/ad/{ad_name}",
             get(handlers::ad::serve_ad),
         )
+        .route(
+            "/stitch/{session_id}/asset-list/{break_id}",
+            get(handlers::asset_list::serve_asset_list),
+        )
         .layer(cors)
         .with_state(state)
 }

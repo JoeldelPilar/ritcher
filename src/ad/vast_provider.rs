@@ -1,5 +1,5 @@
 use crate::ad::conditioning;
-use crate::ad::provider::{AdProvider, AdSegment, AdTrackingInfo, ResolvedSegment};
+use crate::ad::provider::{AdCreative, AdProvider, AdSegment, AdTrackingInfo, ResolvedSegment};
 use crate::ad::slate::SlateProvider;
 use crate::ad::vast::{self, TrackingEvent, VastAdType};
 use crate::metrics;
@@ -392,6 +392,43 @@ impl AdProvider for VastAdProvider {
 
         warn!("VastAdProvider: No cached creative found for {}", ad_name);
         None
+    }
+
+    fn get_ad_creatives(&self, duration: f32, session_id: &str) -> Vec<AdCreative> {
+        let url = self.resolve_endpoint(duration);
+        info!(
+            "VastAdProvider: Fetching VAST creatives for session {} (duration: {}s)",
+            session_id, duration
+        );
+
+        match self.fetch_vast(&url, 0, session_id, &[], &[]) {
+            Some(creatives) if !creatives.is_empty() => {
+                metrics::record_vast_request("success");
+                creatives
+                    .into_iter()
+                    .map(|c| AdCreative {
+                        uri: c.url,
+                        duration: c.duration as f64,
+                    })
+                    .collect()
+            }
+            Some(_) => {
+                metrics::record_vast_request("empty");
+                warn!(
+                    "VastAdProvider: Empty VAST response for session {} (get_ad_creatives)",
+                    session_id
+                );
+                Vec::new()
+            }
+            None => {
+                metrics::record_vast_request("error");
+                warn!(
+                    "VastAdProvider: VAST failed for session {} (get_ad_creatives)",
+                    session_id
+                );
+                Vec::new()
+            }
+        }
     }
 
     fn resolve_segment_with_tracking(

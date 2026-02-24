@@ -1,4 +1,5 @@
 pub mod ad;
+pub mod asset_list;
 pub mod demo;
 pub mod health;
 pub mod manifest;

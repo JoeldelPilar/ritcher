@@ -1,5 +1,15 @@
 use std::env;
 
+/// HLS stitching mode
+#[derive(Clone, Debug, PartialEq)]
+pub enum StitchingMode {
+    /// Server-Side Ad Insertion: stitcher replaces content segments with ad segments
+    Ssai,
+    /// Server-Guided Ad Insertion: stitcher injects EXT-X-DATERANGE interstitial markers,
+    /// player fetches and plays ads client-side (HLS Interstitials spec)
+    Sgai,
+}
+
 /// Session store type selection
 #[derive(Clone, Debug, PartialEq)]
 pub enum SessionStoreType {
@@ -23,6 +33,8 @@ pub struct Config {
     pub base_url: String,
     pub origin_url: String,
     pub is_dev: bool,
+    /// HLS stitching mode: ssai (default) or sgai
+    pub stitching_mode: StitchingMode,
     /// Ad provider type selection
     pub ad_provider_type: AdProviderType,
     /// Static ad source URL (used when ad_provider_type = Static)
@@ -76,6 +88,16 @@ impl Config {
             env::var("ORIGIN_URL").unwrap_or_else(|_| "https://example.com".to_string())
         } else {
             env::var("ORIGIN_URL").map_err(|_| "ORIGIN_URL is required in production")?
+        };
+
+        // Stitching mode: ssai (default) or sgai
+        let stitching_mode = match env::var("STITCHING_MODE")
+            .unwrap_or_else(|_| "ssai".to_string())
+            .to_lowercase()
+            .as_str()
+        {
+            "sgai" => StitchingMode::Sgai,
+            _ => StitchingMode::Ssai,
         };
 
         // VAST endpoint URL (optional)
@@ -137,6 +159,7 @@ impl Config {
             base_url,
             origin_url,
             is_dev,
+            stitching_mode,
             ad_provider_type,
             ad_source_url,
             ad_segment_duration,

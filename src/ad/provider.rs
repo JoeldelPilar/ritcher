@@ -36,6 +36,19 @@ pub struct ResolvedSegment {
     pub tracking: Option<AdTrackingInfo>,
 }
 
+/// Ad creative for Server-Guided Ad Insertion (SGAI).
+///
+/// Unlike `AdSegment` (single TS segment), `AdCreative` represents a complete
+/// ad unit (HLS master/media playlist or MP4 URL) as served in the
+/// HLS Interstitials asset-list JSON (`ASSETS` array).
+#[derive(Debug, Clone)]
+pub struct AdCreative {
+    /// URI of the ad creative (HLS playlist URL or MP4 URL)
+    pub uri: String,
+    /// Duration of the creative in seconds
+    pub duration: f64,
+}
+
 /// Trait for ad content providers
 ///
 /// Implementations provide ad segments to fill ad breaks of a given duration.
@@ -86,6 +99,24 @@ pub trait AdProvider: Send + Sync {
                 url,
                 tracking: None,
             })
+    }
+
+    /// Get ad creatives for SGAI asset-list responses.
+    ///
+    /// Returns a list of `AdCreative` items that map directly to entries in the
+    /// HLS Interstitials asset-list JSON (`ASSETS` array). Each creative is a
+    /// complete ad unit (HLS playlist or MP4 URL), not an individual segment.
+    ///
+    /// Default implementation adapts the SSAI segment list — one creative per
+    /// segment. VAST provider overrides this to return proper creative-level URLs.
+    fn get_ad_creatives(&self, duration: f32, session_id: &str) -> Vec<AdCreative> {
+        self.get_ad_segments(duration, session_id)
+            .into_iter()
+            .map(|seg| AdCreative {
+                uri: seg.uri,
+                duration: seg.duration as f64,
+            })
+            .collect()
     }
 }
 

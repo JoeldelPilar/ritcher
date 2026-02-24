@@ -64,3 +64,18 @@ pub fn record_tracking_event(event: &str, result: &str) {
     counter!(TRACKING_BEACONS, "event" => event.to_string(), "result" => result.to_string())
         .increment(1);
 }
+
+/// SGAI: total EXT-X-DATERANGE interstitial markers injected
+pub const INTERSTITIALS_INJECTED: &str = "ritcher_interstitials_injected_total";
+/// SGAI: asset-list requests by HTTP status
+pub const ASSET_LIST_REQUESTS: &str = "ritcher_asset_list_requests_total";
+
+/// Record injected interstitial markers
+pub fn record_interstitials(count: usize) {
+    counter!(INTERSTITIALS_INJECTED).increment(count as u64);
+}
+
+/// Record an asset-list request result
+pub fn record_asset_list_request(status: u16) {
+    counter!(ASSET_LIST_REQUESTS, "status" => status.to_string()).increment(1);
+}
