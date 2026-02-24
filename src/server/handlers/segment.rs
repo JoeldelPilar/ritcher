@@ -23,11 +23,14 @@ pub async fn serve_segment(
         segment_path, session_id
     );
 
-    // Get origin base URL from query params or fallback to config
-    let origin_base = params
-        .get("origin")
-        .map(|s| s.as_str())
-        .unwrap_or(&state.config.origin_url);
+    // Get origin base URL from query params or fallback to config.
+    // Validate user-supplied origin against SSRF attack vectors.
+    let origin_base: &str = if let Some(origin) = params.get("origin") {
+        crate::server::url_validation::validate_origin_url(origin)?;
+        origin.as_str()
+    } else {
+        &state.config.origin_url
+    };
 
     let segment_url = format!("{}/{}", origin_base, segment_path);
 
