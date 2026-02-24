@@ -49,23 +49,16 @@ Ritcher runs as a standalone Docker container deployable anywhere. It integrates
 ## Architecture
 
 ```mermaid
-flowchart TD
-    P[Player] -->|Request| R
-
-    subgraph R[Ritcher]
-        direction TB
-        S1[1. Fetch manifest from origin]
-        S2[2. Detect ad breaks]
-        S3[3. Fetch ads from VAST endpoint]
-        S4[4. Interleave ad segments]
-        S5[5. Rewrite URLs through proxy]
-        S6[6. Serve modified manifest]
-        S1 --> S2 --> S3 --> S4 --> S5 --> S6
-    end
-
-    R --> O[Origin CDN]
-    R --> A[Ad Server]
-    R --> SL[Slate Source]
+graph LR
+    Player -->|Request| S1
+    S1[Fetch manifest] --> S2[Detect ad breaks]
+    S2 --> S3[Fetch ads]
+    S3 --> S4[Interleave segments]
+    S4 --> S5[Rewrite URLs]
+    S5 --> S6[Serve manifest]
+    CDN[Origin CDN] -.-> S1
+    ADS[Ad Server] -.-> S3
+    SLATE[Slate Source] -.-> S4
 ```
 
 ---
