@@ -20,7 +20,7 @@ use tracing::info;
 /// We delegate URL resolution to the AdProvider, keeping this handler decoupled
 /// from ad source implementation details.
 ///
-/// Includes 1 retry with 500ms backoff on fetch failure.
+/// Uses [`fetch_with_retry`] for fault-tolerant HTTP fetching.
 pub async fn serve_ad(
     Path((session_id, ad_name)): Path<(String, String)>,
     State(state): State<AppState>,

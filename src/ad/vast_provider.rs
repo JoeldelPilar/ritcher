@@ -118,6 +118,10 @@ impl VastAdProvider {
     ///
     /// Accumulates wrapper tracking data through the chain.
     /// Uses [`fetch_with_retry`] for fault-tolerant HTTP fetching.
+    ///
+    /// Parameters use owned types (`String`, `Vec<T>`) instead of references
+    /// because recursive async functions cannot hold borrows across `.await`
+    /// points without self-referential lifetimes.
     async fn fetch_vast(
         &self,
         url: String,

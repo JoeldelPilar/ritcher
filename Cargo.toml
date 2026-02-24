@@ -30,6 +30,7 @@ redis = { version = "0.29", features = ["tokio-comp", "connection-manager"], opt
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
+wiremock = "0.6"
 
 [[bench]]
 name = "manifest_pipeline"

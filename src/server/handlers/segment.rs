@@ -16,7 +16,7 @@ use tracing::info;
 
 /// Proxy video segments from origin to player
 ///
-/// Includes 1 retry with 500ms backoff on fetch failure.
+/// Uses [`fetch_with_retry`] for fault-tolerant HTTP fetching.
 pub async fn serve_segment(
     Path((session_id, segment_path)): Path<(String, String)>,
     Query(params): Query<HashMap<String, String>>,

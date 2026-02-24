@@ -15,6 +15,7 @@ pub const DEFAULT_MAX_ATTEMPTS: u32 = 2;
 pub const DEFAULT_BACKOFF_MS: u64 = 500;
 
 /// Configuration for [`fetch_with_retry`].
+#[derive(Debug, Clone)]
 pub struct RetryConfig {
     /// Total number of attempts (minimum 1; 0 is treated as 1).
     pub max_attempts: u32,
@@ -54,9 +55,10 @@ pub async fn fetch_with_retry(
 ) -> Result<Response, reqwest::Error> {
     let max_attempts = config.max_attempts.max(1);
 
-    for attempt in 1..=max_attempts {
-        let is_last = attempt == max_attempts;
-
+    // Retry loop: attempts 1 through N-1, with backoff between each.
+    // The final attempt is handled separately below to guarantee a
+    // return without `unreachable!()` or other panic paths.
+    for attempt in 1..max_attempts {
         let mut request = client.get(url);
         if let Some(timeout) = config.timeout {
             request = request.timeout(timeout);
@@ -73,10 +75,6 @@ pub async fn fetch_with_retry(
                     attempt,
                     max_attempts
                 );
-                let err = response.error_for_status().unwrap_err();
-                if is_last {
-                    return Err(err);
-                }
             }
 
             Err(e) => {
@@ -84,9 +82,6 @@ pub async fn fetch_with_retry(
                     "HTTP fetch failed for {} (attempt {}/{}): {}",
                     url, attempt, max_attempts, e
                 );
-                if is_last {
-                    return Err(e);
-                }
             }
         }
 
@@ -94,10 +89,31 @@ pub async fn fetch_with_retry(
         tokio::time::sleep(config.backoff).await;
     }
 
-    unreachable!(
-        "fetch_with_retry: exhausted {} attempt(s) without returning — this is a bug",
-        max_attempts
-    )
+    // Final attempt — returns directly, no further retry
+    let mut request = client.get(url);
+    if let Some(timeout) = config.timeout {
+        request = request.timeout(timeout);
+    }
+
+    let response = request.send().await.map_err(|e| {
+        warn!(
+            "HTTP fetch failed for {} (attempt {}/{}): {}",
+            url, max_attempts, max_attempts, e
+        );
+        e
+    })?;
+
+    if !response.status().is_success() {
+        warn!(
+            "HTTP fetch returned {} for {} (attempt {}/{})",
+            response.status(),
+            url,
+            max_attempts,
+            max_attempts
+        );
+    }
+
+    response.error_for_status()
 }
 
 #[cfg(test)]
@@ -132,5 +148,129 @@ mod tests {
         };
         // max(1) guard ensures at least one attempt
         assert_eq!(cfg.max_attempts.max(1), 1);
+    }
+
+    #[test]
+    fn retry_config_is_debug() {
+        let cfg = RetryConfig::default();
+        let debug = format!("{:?}", cfg);
+        assert!(debug.contains("max_attempts"));
+        assert!(debug.contains("backoff"));
+    }
+
+    #[test]
+    fn retry_config_is_clone() {
+        let cfg = RetryConfig {
+            max_attempts: 3,
+            backoff: Duration::from_millis(200),
+            timeout: Some(Duration::from_secs(5)),
+        };
+        let cloned = cfg.clone();
+        assert_eq!(cloned.max_attempts, 3);
+        assert_eq!(cloned.backoff, Duration::from_millis(200));
+        assert_eq!(cloned.timeout, Some(Duration::from_secs(5)));
+    }
+
+    // ---- Integration tests using wiremock ----
+
+    #[tokio::test]
+    async fn succeeds_on_first_attempt() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+            .mount(&server)
+            .await;
+
+        let client = Client::new();
+        let config = RetryConfig {
+            backoff: Duration::from_millis(1),
+            ..Default::default()
+        };
+
+        let result = fetch_with_retry(&client, &server.uri(), &config).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().text().await.unwrap(), "ok");
+    }
+
+    #[tokio::test]
+    async fn retries_on_server_error_then_succeeds() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        // 200 fallback (lower priority — mounted first)
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("recovered"))
+            .mount(&server)
+            .await;
+
+        // 500 on first hit (higher priority — mounted last, deactivates after 1)
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(500))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+
+        let client = Client::new();
+        let config = RetryConfig {
+            max_attempts: 2,
+            backoff: Duration::from_millis(1),
+            timeout: None,
+        };
+
+        let result = fetch_with_retry(&client, &server.uri(), &config).await;
+        assert!(result.is_ok(), "Expected success after retry");
+        assert_eq!(result.unwrap().text().await.unwrap(), "recovered");
+    }
+
+    #[tokio::test]
+    async fn returns_error_after_all_retries_exhausted() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+
+        let client = Client::new();
+        let config = RetryConfig {
+            max_attempts: 2,
+            backoff: Duration::from_millis(1),
+            timeout: None,
+        };
+
+        let result = fetch_with_retry(&client, &server.uri(), &config).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn single_attempt_no_retry() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let client = Client::new();
+        let config = RetryConfig {
+            max_attempts: 1,
+            backoff: Duration::from_millis(1),
+            timeout: None,
+        };
+
+        let result = fetch_with_retry(&client, &server.uri(), &config).await;
+        assert!(result.is_err());
     }
 }
