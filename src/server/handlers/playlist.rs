@@ -1,7 +1,8 @@
 use crate::{
     ad::{AdProvider, interleaver},
+    config::StitchingMode,
     error::Result,
-    hls::{cue, parser},
+    hls::{cue, interstitial, parser},
     metrics,
     server::state::AppState,
 };
@@ -78,6 +79,7 @@ pub async fn serve_playlist(
         origin_base,
         state.ad_provider.as_ref(),
         track_type,
+        &state.config.stitching_mode,
     )?;
 
     // Serialize to string
@@ -102,6 +104,10 @@ pub async fn serve_playlist(
 /// - `"audio"` — ad insertion if CUE markers present (muxed ads contain audio),
 ///   otherwise pass through unchanged
 /// - `"subtitles"` — skip ad insertion entirely, only rewrite URLs
+///
+/// The `stitching_mode` selects the insertion strategy:
+/// - `StitchingMode::Ssai` — replace content segments with ad segments (traditional SSAI)
+/// - `StitchingMode::Sgai` — inject EXT-X-DATERANGE interstitial markers (HLS Interstitials)
 fn process_playlist(
     playlist: Playlist,
     session_id: &str,
@@ -109,6 +115,7 @@ fn process_playlist(
     origin_base: &str,
     ad_provider: &dyn AdProvider,
     track_type: &str,
+    stitching_mode: &StitchingMode,
 ) -> Result<Playlist> {
     // Handle MasterPlaylist: rewrite variant-stream URLs through stitcher
     if matches!(&playlist, Playlist::MasterPlaylist(_)) {
@@ -138,22 +145,39 @@ fn process_playlist(
         );
         metrics::record_ad_breaks(ad_breaks.len());
 
-        // Step 2: Get ad segments for each break
-        // For audio tracks, the same muxed ad segments are used — the player
-        // demuxes the audio track from the muxed container
-        let ad_segments_per_break: Vec<_> = ad_breaks
-            .iter()
-            .map(|ad_break| ad_provider.get_ad_segments(ad_break.duration, session_id))
-            .collect();
+        match stitching_mode {
+            StitchingMode::Ssai => {
+                // Step 2: Get ad segments for each break
+                // For audio tracks, the same muxed ad segments are used — the player
+                // demuxes the audio track from the muxed container
+                let ad_segments_per_break: Vec<_> = ad_breaks
+                    .iter()
+                    .map(|ad_break| ad_provider.get_ad_segments(ad_break.duration, session_id))
+                    .collect();
 
-        // Step 3: Interleave ads into playlist
-        media_playlist = interleaver::interleave_ads(
-            media_playlist,
-            &ad_breaks,
-            &ad_segments_per_break,
-            session_id,
-            base_url,
-        );
+                // Step 3: Interleave ads into playlist
+                media_playlist = interleaver::interleave_ads(
+                    media_playlist,
+                    &ad_breaks,
+                    &ad_segments_per_break,
+                    session_id,
+                    base_url,
+                );
+            }
+            StitchingMode::Sgai => {
+                // SGAI: inject EXT-X-DATERANGE interstitial markers
+                // Ensure PDT is present (required by HLS Interstitials spec)
+                interstitial::ensure_program_date_time(&mut media_playlist);
+                // Inject DateRange tags for each ad break
+                interstitial::inject_interstitials(
+                    &mut media_playlist,
+                    &ad_breaks,
+                    session_id,
+                    base_url,
+                );
+                metrics::record_interstitials(ad_breaks.len());
+            }
+        }
     } else if track_type == "audio" {
         // Audio rendition without CUE markers: pass through without ad insertion.
         // The muxed video ad segments already contain audio, but without CUE markers
@@ -164,6 +188,8 @@ fn process_playlist(
     }
 
     // Step 4: Rewrite content URLs to proxy through stitcher
+    // Note: in SGAI mode we still rewrite content URLs so segments flow through
+    // the stitcher proxy (required for session-aware segment serving)
     let playlist = Playlist::MediaPlaylist(media_playlist);
     parser::rewrite_content_urls(playlist, session_id, base_url, origin_base)
 }

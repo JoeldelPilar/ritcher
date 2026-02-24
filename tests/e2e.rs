@@ -3,17 +3,18 @@
 //! Starts a real Axum server on a random port and tests the full
 //! HTTP pipeline for both HLS and DASH endpoints.
 
-use ritcher::config::{AdProviderType, Config, SessionStoreType};
+use ritcher::config::{AdProviderType, Config, SessionStoreType, StitchingMode};
 use ritcher::server::build_router;
 use std::net::SocketAddr;
 
-/// Start a test server on a random port and return its address
+/// Start a test server on a random port and return its address (SSAI mode)
 async fn start_test_server() -> SocketAddr {
     let config = Config {
         port: 0,
         base_url: "http://localhost".to_string(),
         origin_url: "https://example.com".to_string(),
         is_dev: true,
+        stitching_mode: StitchingMode::Ssai,
         ad_provider_type: AdProviderType::Static,
         ad_source_url: "https://hls.src.tedm.io/content/ts_h264_480p_1s".to_string(),
         ad_segment_duration: 1.0,
@@ -152,6 +153,148 @@ async fn dash_stitch_pipeline() {
     assert!(
         body.contains("ad-0"),
         "Expected ad Period 'ad-0' from interleaving, got:\n{}",
+        body
+    );
+}
+
+// ── SGAI tests ───────────────────────────────────────────────────────────────
+
+/// Start a test server in SGAI mode on a random port
+async fn start_sgai_test_server() -> SocketAddr {
+    let config = Config {
+        port: 0,
+        base_url: "http://localhost".to_string(),
+        origin_url: "https://example.com".to_string(),
+        is_dev: true,
+        stitching_mode: StitchingMode::Sgai,
+        ad_provider_type: AdProviderType::Static,
+        ad_source_url: "https://hls.src.tedm.io/content/ts_h264_480p_1s".to_string(),
+        ad_segment_duration: 1.0,
+        vast_endpoint: None,
+        slate_url: None,
+        slate_segment_duration: 1.0,
+        session_store: SessionStoreType::Memory,
+        valkey_url: None,
+        session_ttl_secs: 300,
+    };
+
+    let app = build_router(config).await;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("Failed to bind SGAI test server");
+    let addr = listener.local_addr().unwrap();
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    addr
+}
+
+#[tokio::test]
+async fn sgai_hls_interstitials() {
+    let addr = start_sgai_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Use the demo playlist as origin (has EXT-X-PROGRAM-DATE-TIME + CUE markers)
+    let origin = format!("http://{}/demo/playlist.m3u8", addr);
+    let resp = client
+        .get(format!(
+            "http://{}/stitch/sgai-test/playlist.m3u8?origin={}",
+            addr, origin
+        ))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+
+    assert!(body.contains("#EXTM3U"), "Should be valid HLS");
+    assert!(
+        body.contains("EXT-X-DATERANGE"),
+        "Expected EXT-X-DATERANGE from SGAI interstitial injection, got:\n{}",
+        body
+    );
+    assert!(
+        body.contains("com.apple.hls.interstitial"),
+        "Expected CLASS=com.apple.hls.interstitial, got:\n{}",
+        body
+    );
+    // SGAI does not replace segments — no DISCONTINUITY tags
+    assert!(
+        !body.contains("EXT-X-DISCONTINUITY"),
+        "SGAI should not inject DISCONTINUITY tags, got:\n{}",
+        body
+    );
+}
+
+#[tokio::test]
+async fn sgai_asset_list_endpoint() {
+    let addr = start_sgai_test_server().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!(
+            "http://{}/stitch/sgai-test/asset-list/0?dur=30",
+            addr
+        ))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    assert!(
+        resp.headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("application/json"),
+        "Content-Type should be application/json"
+    );
+
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(
+        body["ASSETS"].is_array(),
+        "Response should have ASSETS array"
+    );
+    assert!(
+        !body["ASSETS"].as_array().unwrap().is_empty(),
+        "ASSETS array should not be empty"
+    );
+}
+
+#[tokio::test]
+async fn ssai_mode_unchanged() {
+    // Regression: SSAI pipeline must be unaffected by the SGAI additions
+    let addr = start_test_server().await;
+    let client = reqwest::Client::new();
+
+    let origin = format!("http://{}/demo/playlist.m3u8", addr);
+    let resp = client
+        .get(format!(
+            "http://{}/stitch/ssai-regression/playlist.m3u8?origin={}",
+            addr, origin
+        ))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+
+    assert!(body.contains("#EXTM3U"));
+    assert!(
+        body.contains("#EXT-X-DISCONTINUITY"),
+        "SSAI should still inject DISCONTINUITY tags, got:\n{}",
+        body
+    );
+    // No SGAI markers should appear in SSAI mode
+    assert!(
+        !body.contains("com.apple.hls.interstitial"),
+        "SSAI mode must not include interstitial markers, got:\n{}",
         body
     );
 }

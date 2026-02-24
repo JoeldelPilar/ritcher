@@ -30,6 +30,7 @@ pub async fn serve_demo_playlist() -> Response {
 #EXT-X-VERSION:3
 #EXT-X-TARGETDURATION:10
 #EXT-X-MEDIA-SEQUENCE:0
+#EXT-X-PROGRAM-DATE-TIME:2026-01-01T00:00:00.000Z
 
 #EXTINF:10.0,
 https://test-streams.mux.dev/x36xhzz/url_0/url_462/193039199_mp4_h264_aac_hd_7.ts
