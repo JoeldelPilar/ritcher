@@ -48,22 +48,17 @@ Ritcher runs as a standalone Docker container deployable anywhere. It integrates
 
 ## Architecture
 
-```
-                    +------------------+
-  Player  -------->|     Ritcher      |
-                    |                  |
-                    |  1. Fetch manifest from origin
-                    |  2. Detect ad breaks (CUE/EventStream)
-                    |  3. Fetch ads from VAST endpoint
-                    |  4. Interleave ad segments
-                    |  5. Rewrite URLs through proxy
-                    |  6. Serve modified manifest
-                    +--------+---------+
-                             |
-              +--------------+--------------+
-              |              |              |
-        Origin CDN      Ad Server      Slate Source
-     (content segs)   (VAST endpoint)  (fallback video)
+```mermaid
+graph LR
+    Player -->|Request| S1
+    S1[Fetch manifest] --> S2[Detect ad breaks]
+    S2 --> S3[Fetch ads]
+    S3 --> S4[Interleave segments]
+    S4 --> S5[Rewrite URLs]
+    S5 --> S6[Serve manifest]
+    CDN[Origin CDN] -.-> S1
+    ADS[Ad Server] -.-> S3
+    SLATE[Slate Source] -.-> S4
 ```
 
 ---
