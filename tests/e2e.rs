@@ -3,7 +3,7 @@
 //! Starts a real Axum server on a random port and tests the full
 //! HTTP pipeline for both HLS and DASH endpoints.
 
-use ritcher::config::{AdProviderType, Config};
+use ritcher::config::{AdProviderType, Config, SessionStoreType};
 use ritcher::server::build_router;
 use std::net::SocketAddr;
 
@@ -20,9 +20,12 @@ async fn start_test_server() -> SocketAddr {
         vast_endpoint: None,
         slate_url: None,
         slate_segment_duration: 1.0,
+        session_store: SessionStoreType::Memory,
+        valkey_url: None,
+        session_ttl_secs: 300,
     };
 
-    let app = build_router(config);
+    let app = build_router(config).await;
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await

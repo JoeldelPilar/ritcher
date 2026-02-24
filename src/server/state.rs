@@ -1,6 +1,6 @@
 use crate::{
     ad::{AdProvider, SlateProvider, StaticAdProvider, VastAdProvider},
-    config::{AdProviderType, Config},
+    config::{AdProviderType, Config, SessionStoreType},
     session::SessionManager,
 };
 use reqwest::Client;
@@ -25,7 +25,7 @@ pub struct AppState {
 
 impl AppState {
     /// Create a new AppState with the given configuration
-    pub fn new(config: Config) -> Self {
+    pub async fn new(config: Config) -> Self {
         let http_client = Client::builder()
             .timeout(Duration::from_secs(30))
             .connect_timeout(Duration::from_secs(5))
@@ -34,8 +34,24 @@ impl AppState {
             .build()
             .expect("Failed to create HTTP client");
 
-        // Session TTL: 5 minutes
-        let sessions = SessionManager::new(Duration::from_secs(300));
+        let ttl = Duration::from_secs(config.session_ttl_secs);
+        let sessions = match config.session_store {
+            SessionStoreType::Memory => SessionManager::new_memory(ttl),
+            #[cfg(feature = "valkey")]
+            SessionStoreType::Valkey => {
+                let url = config
+                    .valkey_url
+                    .as_deref()
+                    .expect("VALKEY_URL is required when SESSION_STORE=valkey");
+                SessionManager::new_valkey(url, ttl)
+                    .await
+                    .expect("Failed to connect to Valkey")
+            }
+            #[cfg(not(feature = "valkey"))]
+            SessionStoreType::Valkey => {
+                panic!("SESSION_STORE=valkey requires the 'valkey' feature flag");
+            }
+        };
 
         // Create ad provider based on config
         let ad_provider: Arc<dyn AdProvider> = match config.ad_provider_type {
