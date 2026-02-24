@@ -28,11 +28,12 @@ Ritcher runs as a standalone Docker container deployable anywhere. It integrates
 - **Demo endpoint** — Synthetic DASH manifest with SCTE-35 EventStream for testing
 
 ### Shared
+- **Multi-track ad insertion** — Handles separate audio/video/subtitle renditions; HLS `track` param for per-rendition playlists, DASH AdaptationSet mirroring with bandwidth and language preservation
 - **VAST ad provider** — Fetches and parses VAST 2.0/3.0/4.0 XML from any ad server, with wrapper chain support
 - **Static ad provider** — Built-in provider for testing with pre-configured ad segments
 - **Slate management** — Fallback filler content when VAST returns no ads or fails
 - **Segment proxying** — High-performance proxying for content, ad, and slate segments with retry logic
-- **Session management** — Per-session stitching with automatic TTL-based cleanup
+- **Session management** — In-memory (DashMap) or distributed (Valkey/Redis) session store with automatic TTL-based cleanup. Feature-flagged: `cargo build --features valkey`
 - **Prometheus metrics** — `GET /metrics` endpoint with request counts, durations, VAST stats, and session gauges
 - **Ad tracking & beaconing** — VAST impression, quartile (start/firstQuartile/midpoint/thirdQuartile/complete), and error beacons fired server-side on segment delivery
 - **Ad conditioning** — Warning-level validation of ad creative compatibility (codec, resolution, MIME type)
@@ -157,8 +158,13 @@ cargo run --release
 | `SLATE_SEGMENT_DURATION` | Slate segment duration (seconds) | No | `1.0` |
 | `AD_SOURCE_URL` | Static ad segment source | For static mode | tedm.io test stream |
 | `AD_SEGMENT_DURATION` | Static ad segment duration (seconds) | No | `1.0` |
+| `SESSION_STORE` | Session backend: `memory` or `valkey` | No | `memory` |
+| `VALKEY_URL` | Valkey/Redis connection URL | When `SESSION_STORE=valkey` | — |
+| `SESSION_TTL_SECS` | Session TTL in seconds | No | `300` |
 
 **Auto-detection**: When `AD_PROVIDER_TYPE=auto` (default), Ritcher uses VAST if `VAST_ENDPOINT` is set, otherwise falls back to static.
+
+**Distributed sessions**: To share sessions across multiple Ritcher instances behind a load balancer, build with `cargo build --features valkey` and set `SESSION_STORE=valkey` with a `VALKEY_URL`.
 
 ---
 
@@ -181,22 +187,22 @@ Prometheus metrics available at `GET /metrics`:
 
 ## Performance
 
-In live SSAI, every concurrent viewer gets a **unique manifest** on every segment refresh — this work cannot be CDN-cached. The stitcher's manifest pipeline is the scalability bottleneck.
+In live SSAI, every concurrent viewer gets a **unique manifest** on every segment refresh — this work cannot be CDN-cached. The stitcher's manifest pipeline is one of the scalability bottlenecks.
 
-Ritcher's pipeline (parse → detect CUE breaks → interleave ads → rewrite URLs → serialize) runs in **~6 µs** for a typical live playlist:
+Ritcher's **CPU-only manifest pipeline** (parse → detect CUE breaks → interleave ads → rewrite URLs → serialize) runs in **~6 µs** for a typical live playlist:
 
-| Scenario | Time per manifest | Throughput (single core) |
-|---|---|---|
-| Typical live (6 segments, 1 ad break) | ~6 µs | ~156K ops/sec |
-| Medium window (15 segments, 1 ad break) | ~12 µs | ~84K ops/sec |
-| DVR/catchup (60 segments, 3 ad breaks) | ~44 µs | ~23K ops/sec |
-| Pass-through (no ads) | ~7 µs | ~137K ops/sec |
+| Scenario | Segments | Ad Breaks | Time per manifest | CPU throughput (single core) |
+|---|---|---|---|---|
+| Typical live | 6 | 1 | ~6 µs | ~156K ops/sec |
+| Medium window | 15 | 1 | ~12 µs | ~84K ops/sec |
+| DVR/catchup | 60 | 3 | ~44 µs | ~23K ops/sec |
+| Pass-through | 12 | 0 | ~7 µs | ~137K ops/sec |
 
-**What this means in practice:** with 6-second segments, a single core can serve ~156K manifest requests/sec — enough for **~900K concurrent viewers**. With Tokio's multi-threaded runtime across 4+ cores, Ritcher can handle millions of concurrent viewers on a single instance.
+> **Important:** These numbers measure pure CPU time for manifest manipulation — no network I/O is included. In a real deployment, each manifest request also involves fetching the source playlist from the origin CDN, and segment proxying consumes significant bandwidth. Real-world throughput depends heavily on network latency, connection concurrency, and available bandwidth — not just CPU.
 
 VAST XML parsing adds ~18 µs per ad pod (3 ads, 3 media files each), though in production this is cached per ad break rather than per viewer.
 
-See [BENCHMARK.md](BENCHMARK.md) for detailed results, methodology, and scaling analysis. Run benchmarks yourself:
+See [BENCHMARK.md](BENCHMARK.md) for detailed results, methodology, scaling estimates, and real-world considerations. Run benchmarks yourself:
 
 ```bash
 cargo bench
@@ -213,7 +219,8 @@ cargo bench
 - **dash-mpd** — DASH MPD parsing and serialization
 - **quick-xml** — VAST XML parsing
 - **reqwest** — HTTP client with connection pooling
-- **DashMap** — Lock-free concurrent session storage
+- **DashMap** — Lock-free concurrent in-memory session storage
+- **redis 0.29** — Optional Valkey/Redis backend for distributed sessions (feature-flagged)
 - **metrics + metrics-exporter-prometheus** — Prometheus observability
 - **tower-http** — CORS middleware
 - **tracing** — Structured logging
@@ -223,7 +230,7 @@ cargo bench
 ## Testing
 
 ```bash
-# Run all tests (86 tests: 81 unit + 5 E2E)
+# Run all tests (92 tests: 87 unit + 5 E2E)
 cargo test
 
 # Run only unit tests
@@ -277,8 +284,8 @@ cargo clippy -- -D warnings
 
 ### Phase 3: Multi-Track & Session Hardening
 
-- [ ] Multi-track ad insertion (separate audio/video renditions with different segment lengths)
-- [ ] Distributed session store (Valkey/Redis for multi-instance consistency)
+- [x] Multi-track ad insertion (separate audio/video/subtitle renditions)
+- [x] Distributed session store (Valkey/Redis for multi-instance consistency)
 - [x] Ad tracking and beaconing
 
 ### Phase 4: Advanced
