@@ -31,6 +31,7 @@ This makes the manifest pipeline the critical scalability bottleneck. Every micr
 - **Rust**: Edition 2024, release profile (optimized)
 - **Tool**: [Criterion.rs](https://github.com/bheisler/criterion.rs) v0.5
 - **Methodology**: 100 samples per benchmark, statistical analysis with outlier detection
+- **Scope**: CPU-only — all data is generated in-memory, no network I/O involved
 
 Reproduce these results:
 
@@ -62,18 +63,20 @@ parse HLS → detect CUE breaks → interleave ad segments → rewrite URLs → 
 | DVR / catchup | 60 | 3 | 44.3 µs | 23K ops/sec |
 | Pass-through (no ads) | 12 | 0 | 7.3 µs | 137K ops/sec |
 
-### Scaling Estimates
+### CPU Scaling Estimates
 
 Based on the typical live scenario (~6 µs per manifest, 6-second segments):
 
-| Cores | Manifest RPS | Concurrent Viewers |
+| Cores | Manifest pipeline RPS | Theoretical viewer ceiling (CPU-only) |
 |---|---|---|
 | 1 | ~156,000 | ~936,000 |
 | 2 | ~312,000 | ~1,870,000 |
 | 4 | ~624,000 | ~3,740,000 |
 | 8 | ~1,248,000 | ~7,490,000 |
 
-> **Note:** These are theoretical maximums from CPU-only benchmarks. Real-world throughput will be lower due to network I/O, VAST fetches, memory allocation, and OS scheduling. However, VAST responses are cached per ad break (not per viewer), so the CPU-bound manifest pipeline remains the dominant factor during ad break storms.
+> **⚠️ These are CPU-only theoretical ceilings, not real-world capacity.** In production, each manifest request also requires a network round-trip to the origin CDN to fetch the source playlist (~1–50 ms depending on latency and caching). Segment proxying — the actual video bytes flowing through the stitcher — consumes far more bandwidth and connection slots than manifest generation. The real bottleneck in most deployments is network I/O and bandwidth, not CPU.
+>
+> These benchmarks are useful for comparing manifest manipulation efficiency across implementations and confirming that Ritcher's CPU overhead is negligible relative to network costs. They should **not** be read as end-to-end viewer capacity claims.
 
 ---
 
@@ -190,6 +193,20 @@ Empty VAST responses are nearly free, which matters because no-fill rates can be
 
 ---
 
+## What These Benchmarks Do NOT Measure
+
+These are **isolated CPU microbenchmarks** using in-memory generated data. They intentionally exclude:
+
+- **Origin fetch latency** — Each manifest request requires fetching the source playlist from the origin CDN (typically 1–50 ms)
+- **Segment proxying** — The stitcher proxies video segments to the player. Bandwidth and connection handling for segment delivery typically dominate resource usage far more than manifest CPU time
+- **VAST fetch latency** — Real VAST requests involve HTTP round-trips to ad servers (10–500 ms), though responses are cached per ad break
+- **TCP/TLS connection management** — Handling thousands of concurrent HTTP connections adds overhead not captured here
+- **Memory pressure** — High concurrency increases per-connection memory usage from Tokio tasks, HTTP buffers, and session state
+
+The benchmarks are useful for: comparing manifest manipulation efficiency, verifying that CPU is not the bottleneck, and guiding optimization of the hot path. They should not be used to estimate real-world viewer capacity without load testing in a representative network environment.
+
+---
+
 ## Ad Break Storm Analysis
 
 The worst-case scenario in live SSAI is when **all viewers hit an ad break simultaneously** — every manifest request requires both VAST parsing and ad interleaving.
@@ -209,12 +226,12 @@ Even during an ad break storm, the per-viewer cost remains ~6 µs since VAST is 
 
 ## Comparison Context
 
-No direct apples-to-apples benchmarks exist for other open-source stitchers, but for context:
+No direct apples-to-apples benchmarks exist for other open-source stitchers, but for context on the **CPU-bound manifest manipulation** portion:
 
-- **Node.js manifest manipulation** (e.g., `@eyevinn/hls-splice`): Typically measured in milliseconds due to V8 JIT compilation, garbage collection pauses, and single-threaded execution
-- **Ritcher (Rust)**: Measured in microseconds with zero GC pauses and multi-core parallelism via Tokio
+- **Node.js manifest manipulation** (e.g., `@eyevinn/hls-splice`): Typically measured in low milliseconds for similar playlist sizes, due to V8 overhead and garbage collection
+- **Ritcher (Rust)**: Measured in single-digit microseconds with zero GC pauses
 
-The ~1000x difference in overhead is expected for CPU-bound string processing workloads comparing native compiled code to interpreted/JIT runtimes.
+This difference is expected for CPU-bound string processing in compiled vs. JIT-interpreted runtimes. However, in a real SSAI deployment where network I/O dominates (origin fetches, segment proxying), the end-to-end latency difference between implementations is much smaller than the CPU-only numbers suggest. The CPU savings matter most under high concurrency where manifest generation is a meaningful fraction of total request time.
 
 > We welcome benchmark contributions from other SSAI implementations for fair comparison. Open an issue or PR with your results.
 
