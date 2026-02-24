@@ -101,6 +101,13 @@ pub trait AdProvider: Send + Sync {
             })
     }
 
+    /// Evict stale entries from provider-side caches.
+    ///
+    /// Default: no-op — stateless providers have nothing to evict.
+    /// Providers with internal caches (e.g. [`VastAdProvider`]) override this
+    /// to enforce TTL and size limits.
+    fn cleanup_cache(&self) {}
+
     /// Get ad creatives for SGAI asset-list responses.
     ///
     /// Returns a list of `AdCreative` items that map directly to entries in the

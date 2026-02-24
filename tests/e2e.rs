@@ -2,19 +2,36 @@
 //!
 //! Starts a real Axum server on a random port and tests the full
 //! HTTP pipeline for both HLS and DASH endpoints.
+//!
+//! SSRF note: E2E tests bind the listener first to discover the port, then set
+//! `origin_url` in config to the server's own demo endpoint. This avoids
+//! passing `?origin=http://127.0.0.1:PORT/...` as a query parameter (which the
+//! SSRF validator correctly blocks). Config-sourced origins are operator-trusted
+//! and not subject to user-supplied origin validation.
 
 use ritcher::config::{AdProviderType, Config, SessionStoreType, StitchingMode};
 use ritcher::server::build_router;
 use std::net::SocketAddr;
 
-/// Start a test server on a random port and return its address (SSAI mode)
-async fn start_test_server() -> SocketAddr {
+// ── Test server helpers ───────────────────────────────────────────────────────
+
+/// Spin up a test server with the given stitching mode and origin demo path.
+///
+/// Binds a listener first to discover the random port, then configures
+/// `origin_url` to point to the server's own demo endpoint. This avoids
+/// user-supplied `?origin=` params (which the SSRF validator would block).
+async fn start_server(mode: StitchingMode, origin_path: &str) -> SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("Failed to bind test server");
+    let addr = listener.local_addr().unwrap();
+
     let config = Config {
         port: 0,
-        base_url: "http://localhost".to_string(),
-        origin_url: "https://example.com".to_string(),
+        base_url: format!("http://{}", addr),
+        origin_url: format!("http://{}{}", addr, origin_path),
         is_dev: true,
-        stitching_mode: StitchingMode::Ssai,
+        stitching_mode: mode,
         ad_provider_type: AdProviderType::Static,
         ad_source_url: "https://hls.src.tedm.io/content/ts_h264_480p_1s".to_string(),
         ad_segment_duration: 1.0,
@@ -28,17 +45,29 @@ async fn start_test_server() -> SocketAddr {
 
     let app = build_router(config).await;
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("Failed to bind test server");
-    let addr = listener.local_addr().unwrap();
-
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
 
     addr
 }
+
+/// SSAI server with HLS demo playlist as origin.
+async fn start_test_server() -> SocketAddr {
+    start_server(StitchingMode::Ssai, "/demo/playlist.m3u8").await
+}
+
+/// SSAI server with DASH demo manifest as origin.
+async fn start_dash_test_server() -> SocketAddr {
+    start_server(StitchingMode::Ssai, "/demo/manifest.mpd").await
+}
+
+/// SGAI server with HLS demo playlist as origin.
+async fn start_sgai_test_server() -> SocketAddr {
+    start_server(StitchingMode::Sgai, "/demo/playlist.m3u8").await
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn health_check() {
@@ -101,16 +130,13 @@ async fn demo_dash_manifest() {
 
 #[tokio::test]
 async fn hls_stitch_pipeline() {
+    // Config origin_url points to demo playlist — no ?origin= query param needed.
+    // Passing localhost via ?origin= would be rejected by the SSRF validator.
     let addr = start_test_server().await;
     let client = reqwest::Client::new();
 
-    // Use the demo playlist as origin — self-contained, no external deps
-    let origin = format!("http://{}/demo/playlist.m3u8", addr);
     let resp = client
-        .get(format!(
-            "http://{}/stitch/e2e-test/playlist.m3u8?origin={}",
-            addr, origin
-        ))
+        .get(format!("http://{}/stitch/e2e-test/playlist.m3u8", addr))
         .send()
         .await
         .unwrap();
@@ -130,16 +156,12 @@ async fn hls_stitch_pipeline() {
 
 #[tokio::test]
 async fn dash_stitch_pipeline() {
-    let addr = start_test_server().await;
+    // Uses a dedicated server with DASH demo as config origin.
+    let addr = start_dash_test_server().await;
     let client = reqwest::Client::new();
 
-    // Use the demo manifest as origin — self-contained
-    let origin = format!("http://{}/demo/manifest.mpd", addr);
     let resp = client
-        .get(format!(
-            "http://{}/stitch/e2e-test/manifest.mpd?origin={}",
-            addr, origin
-        ))
+        .get(format!("http://{}/stitch/e2e-test/manifest.mpd", addr))
         .send()
         .await
         .unwrap();
@@ -157,53 +179,15 @@ async fn dash_stitch_pipeline() {
     );
 }
 
-// ── SGAI tests ───────────────────────────────────────────────────────────────
-
-/// Start a test server in SGAI mode on a random port
-async fn start_sgai_test_server() -> SocketAddr {
-    let config = Config {
-        port: 0,
-        base_url: "http://localhost".to_string(),
-        origin_url: "https://example.com".to_string(),
-        is_dev: true,
-        stitching_mode: StitchingMode::Sgai,
-        ad_provider_type: AdProviderType::Static,
-        ad_source_url: "https://hls.src.tedm.io/content/ts_h264_480p_1s".to_string(),
-        ad_segment_duration: 1.0,
-        vast_endpoint: None,
-        slate_url: None,
-        slate_segment_duration: 1.0,
-        session_store: SessionStoreType::Memory,
-        valkey_url: None,
-        session_ttl_secs: 300,
-    };
-
-    let app = build_router(config).await;
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("Failed to bind SGAI test server");
-    let addr = listener.local_addr().unwrap();
-
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-
-    addr
-}
+// ── SGAI tests ────────────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn sgai_hls_interstitials() {
     let addr = start_sgai_test_server().await;
     let client = reqwest::Client::new();
 
-    // Use the demo playlist as origin (has EXT-X-PROGRAM-DATE-TIME + CUE markers)
-    let origin = format!("http://{}/demo/playlist.m3u8", addr);
     let resp = client
-        .get(format!(
-            "http://{}/stitch/sgai-test/playlist.m3u8?origin={}",
-            addr, origin
-        ))
+        .get(format!("http://{}/stitch/sgai-test/playlist.m3u8", addr))
         .send()
         .await
         .unwrap();
@@ -272,11 +256,10 @@ async fn ssai_mode_unchanged() {
     let addr = start_test_server().await;
     let client = reqwest::Client::new();
 
-    let origin = format!("http://{}/demo/playlist.m3u8", addr);
     let resp = client
         .get(format!(
-            "http://{}/stitch/ssai-regression/playlist.m3u8?origin={}",
-            addr, origin
+            "http://{}/stitch/ssai-regression/playlist.m3u8",
+            addr
         ))
         .send()
         .await

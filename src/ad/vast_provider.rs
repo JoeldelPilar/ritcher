@@ -6,7 +6,7 @@ use crate::metrics;
 use dashmap::DashMap;
 use reqwest::Client;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
 
 /// Ad creative resolved from VAST (before caching)
@@ -48,6 +48,8 @@ struct ResolvedCreative {
     segment_index: usize,
     /// Whether tracking has been returned for this segment (deduplication)
     visited: bool,
+    /// When this entry was inserted (for TTL-based eviction)
+    inserted_at: Instant,
 }
 
 /// VAST-based ad provider that fetches ads from a VAST endpoint
@@ -347,6 +349,7 @@ impl AdProvider for VastAdProvider {
                     total_segments,
                     segment_index: seg_idx,
                     visited: false,
+                    inserted_at: Instant::now(),
                 },
             );
 
@@ -428,6 +431,44 @@ impl AdProvider for VastAdProvider {
                 );
                 Vec::new()
             }
+        }
+    }
+
+    fn cleanup_cache(&self) {
+        const MAX_AGE: Duration = Duration::from_secs(300);
+        const MAX_SIZE: usize = 10_000;
+
+        let before = self.ad_cache.len();
+
+        // Pass 1: evict entries older than MAX_AGE
+        self.ad_cache
+            .retain(|_, v| v.inserted_at.elapsed() < MAX_AGE);
+
+        // Pass 2: if still over MAX_SIZE, evict the oldest entries first.
+        // Snapshot into a Vec to avoid TOCTOU issues with concurrent inserts.
+        if self.ad_cache.len() > MAX_SIZE {
+            let mut entries: Vec<(String, Duration)> = self
+                .ad_cache
+                .iter()
+                .map(|e| (e.key().clone(), e.value().inserted_at.elapsed()))
+                .collect();
+
+            // Sort descending by age (oldest first)
+            entries.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+
+            let to_remove = entries.len().saturating_sub(MAX_SIZE);
+            for (key, _) in entries.iter().take(to_remove) {
+                self.ad_cache.remove(key);
+            }
+        }
+
+        let after = self.ad_cache.len();
+        if before != after {
+            info!(
+                "VastAdProvider: evicted {} stale cache entries ({} remaining)",
+                before - after,
+                after
+            );
         }
     }
 

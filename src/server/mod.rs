@@ -1,5 +1,6 @@
 pub mod handlers;
 pub mod state;
+pub mod url_validation;
 
 use crate::config::Config;
 use axum::{Router, routing::get};
@@ -22,6 +23,16 @@ pub async fn build_router(config: Config) -> Router {
         loop {
             interval.tick().await;
             cleanup_sessions.cleanup_expired().await;
+        }
+    });
+
+    // Spawn background task for ad cache eviction (TTL + size bound)
+    let cleanup_ad_provider = state.ad_provider.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            cleanup_ad_provider.cleanup_cache();
         }
     });
 

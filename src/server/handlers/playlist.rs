@@ -4,7 +4,7 @@ use crate::{
     error::Result,
     hls::{cue, interstitial, parser},
     metrics,
-    server::state::AppState,
+    server::{state::AppState, url_validation::validate_origin_url},
 };
 use axum::{
     extract::{Path, Query, State},
@@ -25,11 +25,14 @@ pub async fn serve_playlist(
     let start = Instant::now();
     info!("Serving playlist for session: {}", session_id);
 
-    // Get origin URL from query params or fallback to config
-    let origin_url = params
-        .get("origin")
-        .map(|s| s.as_str())
-        .unwrap_or(&state.config.origin_url);
+    // Get origin URL from query params or fallback to config.
+    // Validate user-supplied origin against SSRF attack vectors.
+    let origin_url: &str = if let Some(origin) = params.get("origin") {
+        validate_origin_url(origin)?;
+        origin.as_str()
+    } else {
+        &state.config.origin_url
+    };
 
     info!("Fetching playlist from origin: {}", origin_url);
 

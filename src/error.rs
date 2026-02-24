@@ -28,6 +28,9 @@ pub enum RitcherError {
     #[error("Failed to convert data: {0}")]
     ConversionError(String),
 
+    #[error("Invalid origin URL: {0}")]
+    InvalidOrigin(String),
+
     #[error("Internal server error: {0}")]
     InternalError(String),
 }
@@ -63,6 +66,10 @@ impl IntoResponse for RitcherError {
             RitcherError::ConversionError(ref e) => {
                 tracing::error!("Conversion error: {}", e);
                 (StatusCode::INTERNAL_SERVER_ERROR, self.to_string())
+            }
+            RitcherError::InvalidOrigin(ref e) => {
+                tracing::error!("Invalid origin URL: {}", e);
+                (StatusCode::BAD_REQUEST, self.to_string())
             }
             RitcherError::InternalError(ref e) => {
                 tracing::error!("Internal error: {}", e);
