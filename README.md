@@ -50,22 +50,22 @@ Ritcher runs as a standalone Docker container deployable anywhere. It integrates
 
 ```mermaid
 flowchart TD
-    Player -->|Request| Ritcher
+    P[Player] -->|Request| R
 
-    subgraph Ritcher[" Ritcher "]
+    subgraph R[Ritcher]
         direction TB
-        S1["1. Fetch manifest from origin"]
-        S2["2. Detect ad breaks (CUE/EventStream)"]
-        S3["3. Fetch ads from VAST endpoint"]
-        S4["4. Interleave ad segments"]
-        S5["5. Rewrite URLs through proxy"]
-        S6["6. Serve modified manifest"]
+        S1[1. Fetch manifest from origin]
+        S2[2. Detect ad breaks]
+        S3[3. Fetch ads from VAST endpoint]
+        S4[4. Interleave ad segments]
+        S5[5. Rewrite URLs through proxy]
+        S6[6. Serve modified manifest]
         S1 --> S2 --> S3 --> S4 --> S5 --> S6
     end
 
-    Ritcher --> Origin["Origin CDN\n(content segments)"]
-    Ritcher --> AdServer["Ad Server\n(VAST endpoint)"]
-    Ritcher --> Slate["Slate Source\n(fallback video)"]
+    R --> O[Origin CDN]
+    R --> A[Ad Server]
+    R --> SL[Slate Source]
 ```
 
 ---
