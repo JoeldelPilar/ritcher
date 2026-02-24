@@ -59,7 +59,10 @@ pub async fn serve_asset_list(
         .and_then(|d| d.parse().ok())
         .unwrap_or(30.0);
 
-    let creatives = state.ad_provider.get_ad_creatives(duration, &session_id);
+    let creatives = state
+        .ad_provider
+        .get_ad_creatives(duration, &session_id)
+        .await;
 
     let assets: Vec<Asset> = creatives
         .into_iter()

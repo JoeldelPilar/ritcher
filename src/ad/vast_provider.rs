@@ -2,7 +2,9 @@ use crate::ad::conditioning;
 use crate::ad::provider::{AdCreative, AdProvider, AdSegment, AdTrackingInfo, ResolvedSegment};
 use crate::ad::slate::SlateProvider;
 use crate::ad::vast::{self, TrackingEvent, VastAdType};
+use crate::http_retry::{RetryConfig, fetch_with_retry};
 use crate::metrics;
+use async_trait::async_trait;
 use dashmap::DashMap;
 use reqwest::Client;
 use std::sync::Arc;
@@ -114,18 +116,15 @@ impl VastAdProvider {
 
     /// Fetch and parse VAST XML, following wrapper chains
     ///
-    /// Uses `block_in_place` to run async HTTP requests within the sync
-    /// AdProvider trait methods. This is safe because Axum uses a multi-threaded
-    /// runtime and `block_in_place` only blocks the current thread.
-    ///
     /// Accumulates wrapper tracking data through the chain.
-    fn fetch_vast(
+    /// Uses [`fetch_with_retry`] for fault-tolerant HTTP fetching.
+    async fn fetch_vast(
         &self,
-        url: &str,
+        url: String,
         depth: u32,
-        session_id: &str,
-        wrapper_impressions: &[String],
-        wrapper_tracking: &[TrackingEvent],
+        session_id: String,
+        wrapper_impressions: Vec<String>,
+        wrapper_tracking: Vec<TrackingEvent>,
     ) -> Option<Vec<ResolvedVastCreative>> {
         if depth > self.max_wrapper_depth {
             warn!(
@@ -135,47 +134,23 @@ impl VastAdProvider {
             return None;
         }
 
-        let client = self.http_client.clone();
-        let url = url.to_string();
-        let timeout = self.timeout;
-
-        // Run async reqwest within sync context using block_in_place
-        // Includes 1 retry with 500ms backoff on failure
-        let xml = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let max_attempts = 2;
-                for attempt in 1..=max_attempts {
-                    let response = client.get(&url).timeout(timeout).send().await;
-
-                    match response {
-                        Ok(resp) if resp.status().is_success() => {
-                            return resp.text().await.ok();
-                        }
-                        Ok(resp) => {
-                            error!(
-                                "VAST endpoint returned status {} (attempt {}/{})",
-                                resp.status(),
-                                attempt,
-                                max_attempts
-                            );
-                        }
-                        Err(e) => {
-                            error!(
-                                "VAST request failed: {} (attempt {}/{})",
-                                e, attempt, max_attempts
-                            );
-                        }
-                    }
-
-                    // Retry backoff (skip on last attempt)
-                    if attempt < max_attempts {
-                        warn!("Retrying VAST request in 500ms...");
-                        tokio::time::sleep(Duration::from_millis(500)).await;
-                    }
+        let retry_cfg = RetryConfig {
+            timeout: Some(self.timeout),
+            ..Default::default()
+        };
+        let xml = match fetch_with_retry(&self.http_client, &url, &retry_cfg).await {
+            Ok(resp) => match resp.text().await {
+                Ok(text) => text,
+                Err(e) => {
+                    error!("Failed to read VAST response body: {}", e);
+                    return None;
                 }
-                None
-            })
-        })?;
+            },
+            Err(e) => {
+                error!("VAST request failed after retries: {}", e);
+                return None;
+            }
+        };
 
         let vast_response = match vast::parse_vast(&xml) {
             Ok(r) => r,
@@ -196,15 +171,15 @@ impl VastAdProvider {
                                 vast::select_best_media_file(&linear.media_files)
                         {
                             // Ad conditioning: check creative compatibility (warnings only)
-                            conditioning::check_creative(media_file, session_id);
+                            conditioning::check_creative(media_file, &session_id);
 
                             let is_hls = media_file.mime_type == "application/x-mpegURL";
 
                             // Merge wrapper tracking with inline tracking
-                            let mut impression_urls = wrapper_impressions.to_vec();
+                            let mut impression_urls = wrapper_impressions.clone();
                             impression_urls.extend(inline.impression_urls.clone());
 
-                            let mut tracking_events = wrapper_tracking.to_vec();
+                            let mut tracking_events = wrapper_tracking.clone();
                             tracking_events.extend(linear.tracking_events.clone());
 
                             creatives.push(ResolvedVastCreative {
@@ -220,19 +195,23 @@ impl VastAdProvider {
                 }
                 VastAdType::Wrapper(wrapper) => {
                     // Accumulate wrapper tracking and follow chain
-                    let mut merged_impressions = wrapper_impressions.to_vec();
+                    let mut merged_impressions = wrapper_impressions.clone();
                     merged_impressions.extend(wrapper.impression_urls.clone());
 
-                    let mut merged_tracking = wrapper_tracking.to_vec();
+                    let mut merged_tracking = wrapper_tracking.clone();
                     merged_tracking.extend(wrapper.tracking_events.clone());
 
-                    if let Some(mut wrapped_creatives) = self.fetch_vast(
-                        &wrapper.ad_tag_uri,
+                    // Box::pin is required for recursive async functions to avoid
+                    // infinite future size at compile time
+                    if let Some(mut wrapped_creatives) = Box::pin(self.fetch_vast(
+                        wrapper.ad_tag_uri.clone(),
                         depth + 1,
-                        session_id,
-                        &merged_impressions,
-                        &merged_tracking,
-                    ) {
+                        session_id.clone(),
+                        merged_impressions,
+                        merged_tracking,
+                    ))
+                    .await
+                    {
                         creatives.append(&mut wrapped_creatives);
                     }
                 }
@@ -279,15 +258,19 @@ impl std::fmt::Debug for VastAdProvider {
     }
 }
 
+#[async_trait]
 impl AdProvider for VastAdProvider {
-    fn get_ad_segments(&self, duration: f32, session_id: &str) -> Vec<AdSegment> {
+    async fn get_ad_segments(&self, duration: f32, session_id: &str) -> Vec<AdSegment> {
         let url = self.resolve_endpoint(duration);
         info!(
             "VastAdProvider: Fetching VAST for session {} (duration: {}s) from {}",
             session_id, duration, url
         );
 
-        let creatives = match self.fetch_vast(&url, 0, session_id, &[], &[]) {
+        let creatives = match self
+            .fetch_vast(url, 0, session_id.to_string(), vec![], vec![])
+            .await
+        {
             Some(c) if !c.is_empty() => {
                 metrics::record_vast_request("success");
                 c
@@ -397,14 +380,17 @@ impl AdProvider for VastAdProvider {
         None
     }
 
-    fn get_ad_creatives(&self, duration: f32, session_id: &str) -> Vec<AdCreative> {
+    async fn get_ad_creatives(&self, duration: f32, session_id: &str) -> Vec<AdCreative> {
         let url = self.resolve_endpoint(duration);
         info!(
             "VastAdProvider: Fetching VAST creatives for session {} (duration: {}s)",
             session_id, duration
         );
 
-        match self.fetch_vast(&url, 0, session_id, &[], &[]) {
+        match self
+            .fetch_vast(url, 0, session_id.to_string(), vec![], vec![])
+            .await
+        {
             Some(creatives) if !creatives.is_empty() => {
                 metrics::record_vast_request("success");
                 creatives
