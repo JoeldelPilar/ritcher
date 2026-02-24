@@ -48,22 +48,24 @@ Ritcher runs as a standalone Docker container deployable anywhere. It integrates
 
 ## Architecture
 
-```
-                    +------------------+
-  Player  -------->|     Ritcher      |
-                    |                  |
-                    |  1. Fetch manifest from origin
-                    |  2. Detect ad breaks (CUE/EventStream)
-                    |  3. Fetch ads from VAST endpoint
-                    |  4. Interleave ad segments
-                    |  5. Rewrite URLs through proxy
-                    |  6. Serve modified manifest
-                    +--------+---------+
-                             |
-              +--------------+--------------+
-              |              |              |
-        Origin CDN      Ad Server      Slate Source
-     (content segs)   (VAST endpoint)  (fallback video)
+```mermaid
+flowchart TD
+    Player -->|Request| Ritcher
+
+    subgraph Ritcher[" Ritcher "]
+        direction TB
+        S1["1. Fetch manifest from origin"]
+        S2["2. Detect ad breaks (CUE/EventStream)"]
+        S3["3. Fetch ads from VAST endpoint"]
+        S4["4. Interleave ad segments"]
+        S5["5. Rewrite URLs through proxy"]
+        S6["6. Serve modified manifest"]
+        S1 --> S2 --> S3 --> S4 --> S5 --> S6
+    end
+
+    Ritcher --> Origin["Origin CDN\n(content segments)"]
+    Ritcher --> AdServer["Ad Server\n(VAST endpoint)"]
+    Ritcher --> Slate["Slate Source\n(fallback video)"]
 ```
 
 ---
