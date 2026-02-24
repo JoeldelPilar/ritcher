@@ -2,7 +2,7 @@ use crate::{
     dash::{cue, interleaver, parser},
     error::Result,
     metrics,
-    server::state::AppState,
+    server::{state::AppState, url_validation::validate_origin_url},
 };
 use axum::{
     extract::{Path, Query, State},
@@ -25,7 +25,7 @@ pub async fn serve_manifest(
     // Get origin URL from query params or fallback to config.
     // Validate user-supplied origin against SSRF attack vectors.
     let origin_url: &str = if let Some(origin) = params.get("origin") {
-        crate::server::url_validation::validate_origin_url(origin)?;
+        validate_origin_url(origin)?;
         origin.as_str()
     } else {
         &state.config.origin_url

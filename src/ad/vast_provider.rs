@@ -444,7 +444,8 @@ impl AdProvider for VastAdProvider {
         self.ad_cache
             .retain(|_, v| v.inserted_at.elapsed() < MAX_AGE);
 
-        // Pass 2: if still over MAX_SIZE, evict the oldest entries first
+        // Pass 2: if still over MAX_SIZE, evict the oldest entries first.
+        // Snapshot into a Vec to avoid TOCTOU issues with concurrent inserts.
         if self.ad_cache.len() > MAX_SIZE {
             let mut entries: Vec<(String, Duration)> = self
                 .ad_cache
@@ -455,7 +456,7 @@ impl AdProvider for VastAdProvider {
             // Sort descending by age (oldest first)
             entries.sort_unstable_by(|a, b| b.1.cmp(&a.1));
 
-            let to_remove = self.ad_cache.len() - MAX_SIZE;
+            let to_remove = entries.len().saturating_sub(MAX_SIZE);
             for (key, _) in entries.iter().take(to_remove) {
                 self.ad_cache.remove(key);
             }

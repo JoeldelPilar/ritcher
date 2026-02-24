@@ -15,11 +15,12 @@ use std::net::SocketAddr;
 
 // ── Test server helpers ───────────────────────────────────────────────────────
 
-/// Start an SSAI test server with HLS demo playlist as origin.
+/// Spin up a test server with the given stitching mode and origin demo path.
 ///
 /// Binds a listener first to discover the random port, then configures
-/// `origin_url` to point to the server's own `/demo/playlist.m3u8`.
-async fn start_test_server() -> SocketAddr {
+/// `origin_url` to point to the server's own demo endpoint. This avoids
+/// user-supplied `?origin=` params (which the SSRF validator would block).
+async fn start_server(mode: StitchingMode, origin_path: &str) -> SocketAddr {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("Failed to bind test server");
@@ -28,9 +29,9 @@ async fn start_test_server() -> SocketAddr {
     let config = Config {
         port: 0,
         base_url: format!("http://{}", addr),
-        origin_url: format!("http://{}/demo/playlist.m3u8", addr),
+        origin_url: format!("http://{}{}", addr, origin_path),
         is_dev: true,
-        stitching_mode: StitchingMode::Ssai,
+        stitching_mode: mode,
         ad_provider_type: AdProviderType::Static,
         ad_source_url: "https://hls.src.tedm.io/content/ts_h264_480p_1s".to_string(),
         ad_segment_duration: 1.0,
@@ -51,70 +52,19 @@ async fn start_test_server() -> SocketAddr {
     addr
 }
 
-/// Start an SSAI test server with DASH demo manifest as origin.
+/// SSAI server with HLS demo playlist as origin.
+async fn start_test_server() -> SocketAddr {
+    start_server(StitchingMode::Ssai, "/demo/playlist.m3u8").await
+}
+
+/// SSAI server with DASH demo manifest as origin.
 async fn start_dash_test_server() -> SocketAddr {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("Failed to bind DASH test server");
-    let addr = listener.local_addr().unwrap();
-
-    let config = Config {
-        port: 0,
-        base_url: format!("http://{}", addr),
-        origin_url: format!("http://{}/demo/manifest.mpd", addr),
-        is_dev: true,
-        stitching_mode: StitchingMode::Ssai,
-        ad_provider_type: AdProviderType::Static,
-        ad_source_url: "https://hls.src.tedm.io/content/ts_h264_480p_1s".to_string(),
-        ad_segment_duration: 1.0,
-        vast_endpoint: None,
-        slate_url: None,
-        slate_segment_duration: 1.0,
-        session_store: SessionStoreType::Memory,
-        valkey_url: None,
-        session_ttl_secs: 300,
-    };
-
-    let app = build_router(config).await;
-
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-
-    addr
+    start_server(StitchingMode::Ssai, "/demo/manifest.mpd").await
 }
 
-/// Start an SGAI test server with HLS demo playlist as origin.
+/// SGAI server with HLS demo playlist as origin.
 async fn start_sgai_test_server() -> SocketAddr {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("Failed to bind SGAI test server");
-    let addr = listener.local_addr().unwrap();
-
-    let config = Config {
-        port: 0,
-        base_url: format!("http://{}", addr),
-        origin_url: format!("http://{}/demo/playlist.m3u8", addr),
-        is_dev: true,
-        stitching_mode: StitchingMode::Sgai,
-        ad_provider_type: AdProviderType::Static,
-        ad_source_url: "https://hls.src.tedm.io/content/ts_h264_480p_1s".to_string(),
-        ad_segment_duration: 1.0,
-        vast_endpoint: None,
-        slate_url: None,
-        slate_segment_duration: 1.0,
-        session_store: SessionStoreType::Memory,
-        valkey_url: None,
-        session_ttl_secs: 300,
-    };
-
-    let app = build_router(config).await;
-
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-
-    addr
+    start_server(StitchingMode::Sgai, "/demo/playlist.m3u8").await
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
