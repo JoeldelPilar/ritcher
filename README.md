@@ -4,9 +4,9 @@
   [![CI](https://github.com/JoeldelPilar/ritcher/actions/workflows/ci.yml/badge.svg)](https://github.com/JoeldelPilar/ritcher/actions/workflows/ci.yml)
 </div>
 
-## Open-Source Live SSAI Stitcher
+## Open-Source Live Ad Insertion Stitcher
 
-Ritcher is a high-performance HLS/DASH stitcher built in Rust for Server-Side Ad Insertion (SSAI). It sits between the origin CDN and the player, dynamically inserting ads into live and VOD streams by manipulating manifests and proxying segments.
+Ritcher is a high-performance HLS/DASH stitcher built in Rust for ad insertion. It supports both **SSAI** (Server-Side Ad Insertion) and **SGAI** (Server-Guided Ad Insertion via HLS Interstitials), sitting between the origin CDN and the player to dynamically insert ads into live and VOD streams.
 
 Ritcher runs as a standalone Docker container deployable anywhere. It integrates well with the [Eyevinn Open Source Cloud](https://www.osaas.io) ecosystem — particularly as a downstream stitcher for [Channel Engine](https://github.com/Eyevinn/channel-engine) — but has no platform dependencies.
 
@@ -16,9 +16,11 @@ Ritcher runs as a standalone Docker container deployable anywhere. It integrates
 
 ### HLS
 - **SCTE-35 CUE tag detection** — Detects `EXT-X-CUE-OUT`, `EXT-X-CUE-IN`, and `EXT-X-CUE-OUT-CONT` markers in HLS playlists
-- **Ad interleaving** — Replaces content segments in ad break windows with ad segments, including proper `EXT-X-DISCONTINUITY` tags
+- **SSAI: Ad interleaving** — Replaces content segments in ad break windows with ad segments, including proper `EXT-X-DISCONTINUITY` tags
+- **SGAI: HLS Interstitials** — Injects `EXT-X-DATERANGE` tags with `CLASS="com.apple.hls.interstitial"` per RFC 8216bis, enabling client-side ad playback via hls.js 1.6+ and AVPlayer
+- **Asset-list endpoint** — JSON endpoint returning ad creatives per ad break for HLS Interstitials players
 - **Master playlist support** — Rewrites variant-stream URLs for multi-quality stitching
-- **Demo endpoint** — Synthetic HLS playlist with real Mux test segments and CUE markers for testing
+- **Demo endpoint** — Synthetic HLS playlist with real Mux test segments, CUE markers, and `EXT-X-PROGRAM-DATE-TIME` for testing
 
 ### DASH
 - **DASH MPD parsing** — Parse and serialize DASH MPD manifests with hierarchical BaseURL resolution
@@ -104,6 +106,16 @@ SLATE_URL="https://hls.src.tedm.io/content/ts_h264_480p_1s" \
 cargo run
 ```
 
+### SGAI Mode (HLS Interstitials)
+
+```bash
+# Server-Guided: player fetches ads client-side via HLS Interstitials
+DEV_MODE=true \
+STITCHING_MODE=sgai \
+VAST_ENDPOINT="http://localhost:8080/api/v1/vast?dur=[DURATION]" \
+cargo run
+```
+
 ### Docker
 
 ```bash
@@ -141,6 +153,7 @@ cargo run --release
 | `GET /stitch/{session_id}/manifest.mpd?origin={url}` | Stitched DASH manifest with ad insertion |
 | `GET /stitch/{session_id}/segment/{*path}?origin={base}` | Proxied content segment (HLS/DASH) |
 | `GET /stitch/{session_id}/ad/{ad_name}` | Proxied ad segment |
+| `GET /stitch/{session_id}/asset-list/{break_id}?dur={seconds}` | Asset-list JSON for HLS Interstitials (SGAI mode) |
 
 ---
 
@@ -161,8 +174,11 @@ cargo run --release
 | `SESSION_STORE` | Session backend: `memory` or `valkey` | No | `memory` |
 | `VALKEY_URL` | Valkey/Redis connection URL | When `SESSION_STORE=valkey` | — |
 | `SESSION_TTL_SECS` | Session TTL in seconds | No | `300` |
+| `STITCHING_MODE` | Ad insertion strategy: `ssai` or `sgai` | No | `ssai` |
 
 **Auto-detection**: When `AD_PROVIDER_TYPE=auto` (default), Ritcher uses VAST if `VAST_ENDPOINT` is set, otherwise falls back to static.
+
+**Stitching modes**: `STITCHING_MODE=ssai` (default) replaces content segments with ad segments server-side. `STITCHING_MODE=sgai` injects HLS Interstitial markers (`EXT-X-DATERANGE`) and serves an asset-list endpoint — the player fetches and plays ads client-side. Both modes work with any ad provider (VAST or static).
 
 **Distributed sessions**: To share sessions across multiple Ritcher instances behind a load balancer, build with `cargo build --features valkey` and set `SESSION_STORE=valkey` with a `VALKEY_URL`.
 
@@ -182,6 +198,8 @@ Prometheus metrics available at `GET /metrics`:
 | `ritcher_slate_fallbacks_total` | Counter | Slate fallback activations |
 | `ritcher_tracking_beacons_total` | Counter | Tracking beacons by event and result |
 | `ritcher_origin_fetch_errors_total` | Counter | Origin fetch errors |
+| `ritcher_interstitials_injected_total` | Counter | HLS Interstitial DateRange tags injected (SGAI) |
+| `ritcher_asset_list_requests_total` | Counter | Asset-list endpoint requests by status (SGAI) |
 
 ---
 
@@ -230,7 +248,7 @@ cargo bench
 ## Testing
 
 ```bash
-# Run all tests (92 tests: 87 unit + 5 E2E)
+# Run all tests (103 tests: 95 unit + 8 E2E)
 cargo test
 
 # Run only unit tests
@@ -288,10 +306,17 @@ cargo clippy -- -D warnings
 - [x] Distributed session store (Valkey/Redis for multi-instance consistency)
 - [x] Ad tracking and beaconing
 
-### Phase 4: Advanced
+### Phase 4a: SGAI — HLS Interstitials
+
+- [x] `STITCHING_MODE` env var (`ssai` default, `sgai` option)
+- [x] `EXT-X-DATERANGE` injection with `CLASS="com.apple.hls.interstitial"`
+- [x] `EXT-X-PROGRAM-DATE-TIME` synthesis for origins without PDT
+- [x] Asset-list JSON endpoint per RFC 8216bis §6.3
+- [x] CUE tag removal after DateRange injection (no double-signaling)
+
+### Phase 4b: Advanced
 
 - [ ] Low-latency HLS (LL-HLS)
-- [ ] Server-Guided Ad Insertion (SGAI)
 - [ ] Per-viewer manifest personalization
 
 ---
