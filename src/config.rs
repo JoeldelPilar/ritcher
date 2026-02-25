@@ -188,8 +188,10 @@ mod tests {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
 
         // Save state for all touched vars
-        let save_set: Vec<(&str, Option<String>)> =
-            set.iter().map(|(k, _)| (*k, std::env::var(k).ok())).collect();
+        let save_set: Vec<(&str, Option<String>)> = set
+            .iter()
+            .map(|(k, _)| (*k, std::env::var(k).ok()))
+            .collect();
         let save_unset: Vec<(&str, Option<String>)> =
             unset.iter().map(|k| (*k, std::env::var(k).ok())).collect();
 
@@ -267,7 +269,10 @@ mod tests {
             &["DEV_MODE", "ORIGIN_URL"],
             || {
                 let result = Config::from_env();
-                assert!(result.is_err(), "Should fail without ORIGIN_URL in prod mode");
+                assert!(
+                    result.is_err(),
+                    "Should fail without ORIGIN_URL in prod mode"
+                );
             },
         );
     }

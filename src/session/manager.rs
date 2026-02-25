@@ -380,6 +380,10 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(5)).await;
         manager.cleanup_expired().await;
 
-        assert_eq!(manager.session_count().await, 0, "Stale session should be removed");
+        assert_eq!(
+            manager.session_count().await,
+            0,
+            "Stale session should be removed"
+        );
     }
 }

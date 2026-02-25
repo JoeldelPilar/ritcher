@@ -146,12 +146,15 @@ async fn hls_stitch_pipeline() {
     let body = resp.text().await.unwrap();
 
     // Parse the playlist to ensure it is structurally valid M3U8 (not just a string check)
-    let playlist = m3u8_rs::parse_playlist_res(body.as_bytes())
-        .expect("Response should be valid M3U8");
+    let playlist =
+        m3u8_rs::parse_playlist_res(body.as_bytes()).expect("Response should be valid M3U8");
     let Playlist::MediaPlaylist(pl) = playlist else {
         panic!("Expected a MediaPlaylist, got MasterPlaylist");
     };
-    assert!(!pl.segments.is_empty(), "Stitched playlist should have segments");
+    assert!(
+        !pl.segments.is_empty(),
+        "Stitched playlist should have segments"
+    );
     assert!(
         pl.segments.iter().any(|s| s.discontinuity),
         "Expected DISCONTINUITY from ad interleaving, got:\n{}",
@@ -201,12 +204,15 @@ async fn sgai_hls_interstitials() {
     let body = resp.text().await.unwrap();
 
     // Parse to verify structural validity
-    let playlist = m3u8_rs::parse_playlist_res(body.as_bytes())
-        .expect("Response should be valid M3U8");
+    let playlist =
+        m3u8_rs::parse_playlist_res(body.as_bytes()).expect("Response should be valid M3U8");
     let Playlist::MediaPlaylist(pl) = playlist else {
         panic!("Expected a MediaPlaylist, got MasterPlaylist");
     };
-    assert!(!pl.segments.is_empty(), "SGAI playlist should have segments");
+    assert!(
+        !pl.segments.is_empty(),
+        "SGAI playlist should have segments"
+    );
     // SGAI does not replace segments — no DISCONTINUITY tags expected
     assert!(
         pl.segments.iter().all(|s| !s.discontinuity),
@@ -280,8 +286,8 @@ async fn ssai_mode_unchanged() {
     assert_eq!(resp.status(), 200);
     let body = resp.text().await.unwrap();
 
-    let playlist = m3u8_rs::parse_playlist_res(body.as_bytes())
-        .expect("Response should be valid M3U8");
+    let playlist =
+        m3u8_rs::parse_playlist_res(body.as_bytes()).expect("Response should be valid M3U8");
     let Playlist::MediaPlaylist(pl) = playlist else {
         panic!("Expected a MediaPlaylist, got MasterPlaylist");
     };

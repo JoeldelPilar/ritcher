@@ -538,8 +538,7 @@ mod tests {
     #[test]
     fn resolve_segment_url_finds_cached_entry() {
         let client = Client::new();
-        let provider =
-            VastAdProvider::new("http://ads.example.com/vast".to_string(), client);
+        let provider = VastAdProvider::new("http://ads.example.com/vast".to_string(), client);
 
         provider.ad_cache.insert(
             "session-1:break-0-seg-0.ts".to_string(),
@@ -566,16 +565,14 @@ mod tests {
     #[test]
     fn resolve_segment_url_returns_none_for_unknown() {
         let client = Client::new();
-        let provider =
-            VastAdProvider::new("http://ads.example.com/vast".to_string(), client);
+        let provider = VastAdProvider::new("http://ads.example.com/vast".to_string(), client);
         assert!(provider.resolve_segment_url("break-0-seg-99.ts").is_none());
     }
 
     #[test]
     fn resolve_segment_with_tracking_dedup() {
         let client = Client::new();
-        let provider =
-            VastAdProvider::new("http://ads.example.com/vast".to_string(), client);
+        let provider = VastAdProvider::new("http://ads.example.com/vast".to_string(), client);
 
         provider.ad_cache.insert(
             "session-x:break-0-seg-0.ts".to_string(),
@@ -594,8 +591,7 @@ mod tests {
         );
 
         // First access — tracking should be returned
-        let result1 =
-            provider.resolve_segment_with_tracking("break-0-seg-0.ts", "session-x");
+        let result1 = provider.resolve_segment_with_tracking("break-0-seg-0.ts", "session-x");
         assert!(result1.is_some());
         assert!(
             result1.unwrap().tracking.is_some(),
@@ -603,8 +599,7 @@ mod tests {
         );
 
         // Second access — tracking suppressed (dedup via visited flag)
-        let result2 =
-            provider.resolve_segment_with_tracking("break-0-seg-0.ts", "session-x");
+        let result2 = provider.resolve_segment_with_tracking("break-0-seg-0.ts", "session-x");
         assert!(result2.is_some());
         assert!(
             result2.unwrap().tracking.is_none(),
@@ -615,8 +610,7 @@ mod tests {
     #[test]
     fn cleanup_cache_evicts_old_entries() {
         let client = Client::new();
-        let provider =
-            VastAdProvider::new("http://ads.example.com/vast".to_string(), client);
+        let provider = VastAdProvider::new("http://ads.example.com/vast".to_string(), client);
 
         // Old entry: inserted 400 s ago — exceeds the 300 s MAX_AGE constant
         provider.ad_cache.insert(
@@ -656,7 +650,9 @@ mod tests {
         provider.cleanup_cache();
         assert_eq!(provider.ad_cache.len(), 1, "Old entry should be evicted");
         assert!(
-            provider.ad_cache.contains_key("session-new:break-0-seg-0.ts"),
+            provider
+                .ad_cache
+                .contains_key("session-new:break-0-seg-0.ts"),
             "Fresh entry should remain after cleanup"
         );
     }
@@ -666,13 +662,15 @@ mod tests {
         use crate::ad::slate::SlateProvider;
 
         let client = Client::new();
-        let provider =
-            VastAdProvider::new("http://ads.example.com/vast".to_string(), client);
+        let provider = VastAdProvider::new("http://ads.example.com/vast".to_string(), client);
         assert!(provider.slate.is_none(), "No slate by default");
 
         let slate = SlateProvider::new("http://slate.example.com".to_string(), 1.0);
         let provider = provider.with_slate(slate);
-        assert!(provider.slate.is_some(), "Slate should be configured after with_slate()");
+        assert!(
+            provider.slate.is_some(),
+            "Slate should be configured after with_slate()"
+        );
     }
 
     #[tokio::test]
@@ -716,7 +714,10 @@ mod tests {
         let segments = provider.get_ad_segments(30.0, "session-vast").await;
 
         assert!(!segments.is_empty(), "Should return ad segments from VAST");
-        assert_eq!(segments[0].duration, 15.0, "Duration should match VAST response");
+        assert_eq!(
+            segments[0].duration, 15.0,
+            "Duration should match VAST response"
+        );
         assert_eq!(segments[0].uri, "break-0-seg-0.ts");
 
         // Verify the resolved creative was cached so segment URLs can be resolved
