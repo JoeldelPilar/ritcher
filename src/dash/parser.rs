@@ -96,15 +96,15 @@ pub fn rewrite_dash_urls(
                 };
                 representation.BaseURL.clear();
 
-                // Rewrite SegmentTemplate URLs if present
+                // Rewrite Representation-level SegmentTemplate URLs if present
                 if let Some(ref mut segment_template) = representation.SegmentTemplate {
                     rewrite_segment_template(segment_template, session_id, base_url, &repr_origin)?;
                 }
+            }
 
-                // Also check AdaptationSet-level SegmentTemplate
-                if let Some(ref mut segment_template) = adaptation_set.SegmentTemplate {
-                    rewrite_segment_template(segment_template, session_id, base_url, &repr_origin)?;
-                }
+            // Rewrite AdaptationSet-level SegmentTemplate once (outside representation loop)
+            if let Some(ref mut segment_template) = adaptation_set.SegmentTemplate {
+                rewrite_segment_template(segment_template, session_id, base_url, &adaptation_base)?;
             }
         }
     }
@@ -334,6 +334,55 @@ mod tests {
         assert_eq!(
             compose_url("https://example.com/old", "https://cdn.new.com/path"),
             "https://cdn.new.com/path"
+        );
+    }
+
+    #[test]
+    fn test_adaptation_set_template_rewritten_once_with_multi_repr() {
+        // Regression: AdaptationSet-level SegmentTemplate was previously
+        // rewritten inside the Representation loop, causing N rewrites
+        // for N representations (wrapping the URL multiple times).
+        let xml = r#"<?xml version="1.0"?>
+<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static">
+  <Period>
+    <AdaptationSet contentType="video">
+      <SegmentTemplate media="video-$Number$.m4s" initialization="video-init.mp4"/>
+      <Representation id="low" bandwidth="500000"/>
+      <Representation id="mid" bandwidth="1000000"/>
+      <Representation id="high" bandwidth="2000000"/>
+    </AdaptationSet>
+  </Period>
+</MPD>"#;
+
+        let mut mpd = parse_mpd(xml).expect("Failed to parse MPD");
+        rewrite_dash_urls(
+            &mut mpd,
+            "sess1",
+            "http://stitcher.local",
+            "https://origin.example.com",
+        )
+        .expect("Failed to rewrite URLs");
+
+        let template = mpd.periods[0].adaptations[0]
+            .SegmentTemplate
+            .as_ref()
+            .expect("AdaptationSet should have SegmentTemplate");
+
+        let media = template.media.as_ref().unwrap();
+        // Should contain exactly one /stitch/ prefix, not three
+        assert_eq!(
+            media.matches("/stitch/").count(),
+            1,
+            "SegmentTemplate media should be rewritten exactly once, got: {}",
+            media
+        );
+
+        let init = template.initialization.as_ref().unwrap();
+        assert_eq!(
+            init.matches("/stitch/").count(),
+            1,
+            "SegmentTemplate init should be rewritten exactly once, got: {}",
+            init
         );
     }
 
