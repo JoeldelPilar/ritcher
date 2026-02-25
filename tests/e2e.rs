@@ -9,6 +9,7 @@
 //! SSRF validator correctly blocks). Config-sourced origins are operator-trusted
 //! and not subject to user-supplied origin validation.
 
+use m3u8_rs::Playlist;
 use ritcher::config::{AdProviderType, Config, SessionStoreType, StitchingMode};
 use ritcher::server::build_router;
 use std::net::SocketAddr;
@@ -144,12 +145,19 @@ async fn hls_stitch_pipeline() {
     assert_eq!(resp.status(), 200);
     let body = resp.text().await.unwrap();
 
-    // Verify it's still a valid HLS playlist
-    assert!(body.contains("#EXTM3U"));
-    // Verify ad insertion happened (DISCONTINUITY = ads were interleaved)
+    // Parse the playlist to ensure it is structurally valid M3U8 (not just a string check)
+    let playlist =
+        m3u8_rs::parse_playlist_res(body.as_bytes()).expect("Response should be valid M3U8");
+    let Playlist::MediaPlaylist(pl) = playlist else {
+        panic!("Expected a MediaPlaylist, got MasterPlaylist");
+    };
     assert!(
-        body.contains("#EXT-X-DISCONTINUITY"),
-        "Expected DISCONTINUITY tags from ad interleaving, got:\n{}",
+        !pl.segments.is_empty(),
+        "Stitched playlist should have segments"
+    );
+    assert!(
+        pl.segments.iter().any(|s| s.discontinuity),
+        "Expected DISCONTINUITY from ad interleaving, got:\n{}",
         body
     );
 }
@@ -195,7 +203,23 @@ async fn sgai_hls_interstitials() {
     assert_eq!(resp.status(), 200);
     let body = resp.text().await.unwrap();
 
-    assert!(body.contains("#EXTM3U"), "Should be valid HLS");
+    // Parse to verify structural validity
+    let playlist =
+        m3u8_rs::parse_playlist_res(body.as_bytes()).expect("Response should be valid M3U8");
+    let Playlist::MediaPlaylist(pl) = playlist else {
+        panic!("Expected a MediaPlaylist, got MasterPlaylist");
+    };
+    assert!(
+        !pl.segments.is_empty(),
+        "SGAI playlist should have segments"
+    );
+    // SGAI does not replace segments — no DISCONTINUITY tags expected
+    assert!(
+        pl.segments.iter().all(|s| !s.discontinuity),
+        "SGAI should not inject DISCONTINUITY tags, got:\n{}",
+        body
+    );
+    // DATERANGE injection is not exposed per-segment in m3u8_rs; verify via raw body
     assert!(
         body.contains("EXT-X-DATERANGE"),
         "Expected EXT-X-DATERANGE from SGAI interstitial injection, got:\n{}",
@@ -204,12 +228,6 @@ async fn sgai_hls_interstitials() {
     assert!(
         body.contains("com.apple.hls.interstitial"),
         "Expected CLASS=com.apple.hls.interstitial, got:\n{}",
-        body
-    );
-    // SGAI does not replace segments — no DISCONTINUITY tags
-    assert!(
-        !body.contains("EXT-X-DISCONTINUITY"),
-        "SGAI should not inject DISCONTINUITY tags, got:\n{}",
         body
     );
 }
@@ -268,9 +286,13 @@ async fn ssai_mode_unchanged() {
     assert_eq!(resp.status(), 200);
     let body = resp.text().await.unwrap();
 
-    assert!(body.contains("#EXTM3U"));
+    let playlist =
+        m3u8_rs::parse_playlist_res(body.as_bytes()).expect("Response should be valid M3U8");
+    let Playlist::MediaPlaylist(pl) = playlist else {
+        panic!("Expected a MediaPlaylist, got MasterPlaylist");
+    };
     assert!(
-        body.contains("#EXT-X-DISCONTINUITY"),
+        pl.segments.iter().any(|s| s.discontinuity),
         "SSAI should still inject DISCONTINUITY tags, got:\n{}",
         body
     );

@@ -331,4 +331,59 @@ mod tests {
         manager.remove("test789").await;
         assert_eq!(manager.session_count().await, 0);
     }
+
+    #[tokio::test]
+    async fn session_count_empty() {
+        let manager = SessionManager::new_memory(Duration::from_secs(300));
+        assert_eq!(manager.session_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn get_nonexistent_returns_none() {
+        let manager = SessionManager::new_memory(Duration::from_secs(300));
+        assert!(manager.get("no-such-session").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn remove_nonexistent_returns_none() {
+        let manager = SessionManager::new_memory(Duration::from_secs(300));
+        assert!(manager.remove("no-such-session").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_or_create_returns_existing_session() {
+        let manager = SessionManager::new_memory(Duration::from_secs(300));
+        manager
+            .get_or_create("idempotent".to_string(), "https://first.com".to_string())
+            .await;
+        // Second call with a different origin_url — existing session should be returned
+        let session = manager
+            .get_or_create("idempotent".to_string(), "https://second.com".to_string())
+            .await;
+        assert_eq!(
+            session.origin_url, "https://first.com",
+            "Should return existing session, not create a new one"
+        );
+        assert_eq!(manager.session_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn cleanup_expired_removes_stale_sessions() {
+        // Very short TTL so sessions expire almost immediately.
+        let manager = SessionManager::new_memory(Duration::from_millis(1));
+        manager
+            .get_or_create("stale".to_string(), "https://example.com".to_string())
+            .await;
+        assert_eq!(manager.session_count().await, 1);
+
+        // Wait for TTL to elapse, then clean up.
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        manager.cleanup_expired().await;
+
+        assert_eq!(
+            manager.session_count().await,
+            0,
+            "Stale session should be removed"
+        );
+    }
 }

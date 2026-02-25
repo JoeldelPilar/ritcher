@@ -536,6 +536,200 @@ mod tests {
     }
 
     #[test]
+    fn resolve_segment_url_finds_cached_entry() {
+        let client = Client::new();
+        let provider = VastAdProvider::new("http://ads.example.com/vast".to_string(), client);
+
+        provider.ad_cache.insert(
+            "session-1:break-0-seg-0.ts".to_string(),
+            ResolvedCreative {
+                url: "http://cdn.example.com/ad.m3u8".to_string(),
+                duration: 15.0,
+                is_hls: true,
+                impression_urls: vec![],
+                tracking_events: vec![],
+                error_url: None,
+                total_segments: 1,
+                segment_index: 0,
+                visited: false,
+                inserted_at: Instant::now(),
+            },
+        );
+
+        assert_eq!(
+            provider.resolve_segment_url("break-0-seg-0.ts"),
+            Some("http://cdn.example.com/ad.m3u8".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_segment_url_returns_none_for_unknown() {
+        let client = Client::new();
+        let provider = VastAdProvider::new("http://ads.example.com/vast".to_string(), client);
+        assert!(provider.resolve_segment_url("break-0-seg-99.ts").is_none());
+    }
+
+    #[test]
+    fn resolve_segment_with_tracking_dedup() {
+        let client = Client::new();
+        let provider = VastAdProvider::new("http://ads.example.com/vast".to_string(), client);
+
+        provider.ad_cache.insert(
+            "session-x:break-0-seg-0.ts".to_string(),
+            ResolvedCreative {
+                url: "http://cdn.example.com/ad.m3u8".to_string(),
+                duration: 15.0,
+                is_hls: true,
+                impression_urls: vec!["http://impression.example.com".to_string()],
+                tracking_events: vec![],
+                error_url: None,
+                total_segments: 1,
+                segment_index: 0,
+                visited: false,
+                inserted_at: Instant::now(),
+            },
+        );
+
+        // First access — tracking should be returned
+        let result1 = provider.resolve_segment_with_tracking("break-0-seg-0.ts", "session-x");
+        assert!(result1.is_some());
+        assert!(
+            result1.unwrap().tracking.is_some(),
+            "First access should return tracking"
+        );
+
+        // Second access — tracking suppressed (dedup via visited flag)
+        let result2 = provider.resolve_segment_with_tracking("break-0-seg-0.ts", "session-x");
+        assert!(result2.is_some());
+        assert!(
+            result2.unwrap().tracking.is_none(),
+            "Second access should not return tracking (dedup)"
+        );
+    }
+
+    #[test]
+    fn cleanup_cache_evicts_old_entries() {
+        let client = Client::new();
+        let provider = VastAdProvider::new("http://ads.example.com/vast".to_string(), client);
+
+        // Old entry: inserted 400 s ago — exceeds the 300 s MAX_AGE constant
+        provider.ad_cache.insert(
+            "session-old:break-0-seg-0.ts".to_string(),
+            ResolvedCreative {
+                url: "http://cdn.example.com/old.m3u8".to_string(),
+                duration: 15.0,
+                is_hls: true,
+                impression_urls: vec![],
+                tracking_events: vec![],
+                error_url: None,
+                total_segments: 1,
+                segment_index: 0,
+                visited: false,
+                inserted_at: Instant::now() - Duration::from_secs(400),
+            },
+        );
+
+        // Fresh entry: just inserted
+        provider.ad_cache.insert(
+            "session-new:break-0-seg-0.ts".to_string(),
+            ResolvedCreative {
+                url: "http://cdn.example.com/new.m3u8".to_string(),
+                duration: 15.0,
+                is_hls: true,
+                impression_urls: vec![],
+                tracking_events: vec![],
+                error_url: None,
+                total_segments: 1,
+                segment_index: 0,
+                visited: false,
+                inserted_at: Instant::now(),
+            },
+        );
+
+        assert_eq!(provider.ad_cache.len(), 2);
+        provider.cleanup_cache();
+        assert_eq!(provider.ad_cache.len(), 1, "Old entry should be evicted");
+        assert!(
+            provider
+                .ad_cache
+                .contains_key("session-new:break-0-seg-0.ts"),
+            "Fresh entry should remain after cleanup"
+        );
+    }
+
+    #[test]
+    fn with_slate_configures_slate_provider() {
+        use crate::ad::slate::SlateProvider;
+
+        let client = Client::new();
+        let provider = VastAdProvider::new("http://ads.example.com/vast".to_string(), client);
+        assert!(provider.slate.is_none(), "No slate by default");
+
+        let slate = SlateProvider::new("http://slate.example.com".to_string(), 1.0);
+        let provider = provider.with_slate(slate);
+        assert!(
+            provider.slate.is_some(),
+            "Slate should be configured after with_slate()"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_ad_segments_fetches_vast_and_caches() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // Minimal VAST 3.0 inline with one HLS creative (matches vast.rs test fixture format)
+        const VAST_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<VAST version="3.0">
+  <Ad id="ad-001">
+    <InLine>
+      <AdSystem>TestAds</AdSystem>
+      <AdTitle>Test Ad</AdTitle>
+      <Impression>http://impression.example.com/track</Impression>
+      <Creatives>
+        <Creative id="creative-001">
+          <Linear>
+            <Duration>00:00:15</Duration>
+            <MediaFiles>
+              <MediaFile delivery="streaming" type="application/x-mpegURL" width="1280" height="720">
+                http://ad.example.com/ad.m3u8
+              </MediaFile>
+            </MediaFiles>
+          </Linear>
+        </Creative>
+      </Creatives>
+    </InLine>
+  </Ad>
+</VAST>"#;
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(VAST_XML))
+            .mount(&server)
+            .await;
+
+        let client = Client::new();
+        let provider = VastAdProvider::new(server.uri(), client);
+
+        let segments = provider.get_ad_segments(30.0, "session-vast").await;
+
+        assert!(!segments.is_empty(), "Should return ad segments from VAST");
+        assert_eq!(
+            segments[0].duration, 15.0,
+            "Duration should match VAST response"
+        );
+        assert_eq!(segments[0].uri, "break-0-seg-0.ts");
+
+        // Verify the resolved creative was cached so segment URLs can be resolved
+        let cached_url = provider.resolve_segment_url("break-0-seg-0.ts");
+        assert_eq!(
+            cached_url,
+            Some("http://ad.example.com/ad.m3u8".to_string()),
+            "Resolved creative should be cached after get_ad_segments"
+        );
+    }
+
+    #[test]
     fn test_wrapper_tracking_merge() {
         // Verifies that wrapper impression URLs and tracking events
         // are correctly accumulated and merged with inline ad data.
