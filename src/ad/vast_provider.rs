@@ -374,7 +374,7 @@ impl AdProvider for VastAdProvider {
         segments
     }
 
-    fn resolve_segment_url(&self, ad_name: &str) -> Option<String> {
+    fn resolve_segment_url(&self, ad_name: &str, session_id: &str) -> Option<String> {
         // Check if this is a slate segment
         if ad_name.starts_with("slate-seg-") {
             if let Some(slate) = &self.slate {
@@ -384,12 +384,10 @@ impl AdProvider for VastAdProvider {
             return None;
         }
 
-        // Search across all sessions for this ad_name.
-        // Ad names include break and segment indices, making them unique enough.
-        for entry in self.ad_cache.iter() {
-            if entry.key().ends_with(&format!(":{}", ad_name)) {
-                return Some(entry.value().url.clone());
-            }
+        // Direct O(1) cache lookup using session_id + ad_name
+        let cache_key = Self::cache_key(session_id, ad_name);
+        if let Some(entry) = self.ad_cache.get(&cache_key) {
+            return Some(entry.url.clone());
         }
 
         warn!("VastAdProvider: No cached creative found for {}", ad_name);
@@ -578,7 +576,7 @@ mod tests {
         );
 
         assert_eq!(
-            provider.resolve_segment_url("break-0-seg-0.ts"),
+            provider.resolve_segment_url("break-0-seg-0.ts", "session-1"),
             Some("http://cdn.example.com/ad.m3u8".to_string())
         );
     }
@@ -587,7 +585,11 @@ mod tests {
     fn resolve_segment_url_returns_none_for_unknown() {
         let client = Client::new();
         let provider = VastAdProvider::new("http://ads.example.com/vast".to_string(), client);
-        assert!(provider.resolve_segment_url("break-0-seg-99.ts").is_none());
+        assert!(
+            provider
+                .resolve_segment_url("break-0-seg-99.ts", "session-1")
+                .is_none()
+        );
     }
 
     #[test]
@@ -799,7 +801,7 @@ mod tests {
         assert_eq!(segments[0].uri, "break-0-seg-0.ts");
 
         // Verify the resolved creative was cached so segment URLs can be resolved
-        let cached_url = provider.resolve_segment_url("break-0-seg-0.ts");
+        let cached_url = provider.resolve_segment_url("break-0-seg-0.ts", "session-vast");
         assert_eq!(
             cached_url,
             Some("http://ad.example.com/ad.m3u8".to_string()),
