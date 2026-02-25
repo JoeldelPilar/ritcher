@@ -631,4 +631,229 @@ mod tests {
         let best = select_best_media_file(&files).unwrap();
         assert_eq!(best.url, "https://example.com/ad.mp4");
     }
+
+    // ── Malicious / edge case VAST inputs ───────────────────────────────
+
+    #[test]
+    fn malformed_xml_returns_error() {
+        let xml = r#"<VAST version="3.0"><Ad id="1"><InLine><unclosed"#;
+        let result = parse_vast(xml);
+        assert!(result.is_err(), "Malformed XML should produce an error");
+    }
+
+    #[test]
+    fn xxe_entity_expansion_ignored() {
+        // XML external entity attack — quick-xml does not resolve external entities
+        let xml = r#"<?xml version="1.0"?>
+<!DOCTYPE foo [
+  <!ENTITY xxe SYSTEM "file:///etc/passwd">
+]>
+<VAST version="3.0">
+  <Ad id="xxe-test">
+    <InLine>
+      <AdSystem>&xxe;</AdSystem>
+      <AdTitle>XXE Test</AdTitle>
+      <Creatives></Creatives>
+    </InLine>
+  </Ad>
+</VAST>"#;
+        // quick-xml does not expand external entities by default
+        // It should either error or return the entity reference as-is
+        let result = parse_vast(xml);
+        if let Ok(resp) = result
+            && let Some(ad) = resp.ads.first()
+            && let VastAdType::InLine(inline) = &ad.ad_type
+        {
+            assert!(
+                !inline.ad_system.contains("root:"),
+                "XXE entity should not be expanded"
+            );
+        }
+        // Either an error or safe non-expansion is acceptable
+    }
+
+    #[test]
+    fn empty_vast_body() {
+        let xml = r#"<VAST version="4.0"></VAST>"#;
+        let result = parse_vast(xml).unwrap();
+        assert!(result.ads.is_empty());
+        assert_eq!(result.version, "4.0");
+    }
+
+    #[test]
+    fn ad_without_inline_or_wrapper_skipped() {
+        let xml = r#"<VAST version="3.0">
+  <Ad id="empty-ad">
+  </Ad>
+</VAST>"#;
+        let result = parse_vast(xml).unwrap();
+        assert!(
+            result.ads.is_empty(),
+            "Ad without InLine or Wrapper should be skipped"
+        );
+    }
+
+    #[test]
+    fn missing_media_files_produces_empty_creative() {
+        let xml = r#"<VAST version="3.0">
+  <Ad id="no-media">
+    <InLine>
+      <AdSystem>Test</AdSystem>
+      <AdTitle>No Media</AdTitle>
+      <Creatives>
+        <Creative id="c1">
+          <Linear>
+            <Duration>00:00:15</Duration>
+            <MediaFiles></MediaFiles>
+          </Linear>
+        </Creative>
+      </Creatives>
+    </InLine>
+  </Ad>
+</VAST>"#;
+        let result = parse_vast(xml).unwrap();
+        let ad = &result.ads[0];
+        if let VastAdType::InLine(inline) = &ad.ad_type {
+            let linear = inline.creatives[0].linear.as_ref().unwrap();
+            assert!(
+                linear.media_files.is_empty(),
+                "Empty MediaFiles should produce empty vec"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_duration_formats() {
+        assert_eq!(parse_duration(""), 0.0);
+        assert_eq!(parse_duration("garbage"), 0.0);
+        assert_eq!(parse_duration("00:00"), 0.0);
+        assert_eq!(parse_duration("00:00:00:00"), 0.0);
+        assert_eq!(parse_duration("::"), 0.0);
+        assert_eq!(parse_duration("00:00:-5"), -5.0); // Negative parses but is unusual
+    }
+
+    #[test]
+    fn whitespace_around_urls_trimmed() {
+        let xml = r#"<VAST version="3.0">
+  <Ad id="ws-test">
+    <InLine>
+      <AdSystem>Test</AdSystem>
+      <AdTitle>Whitespace Test</AdTitle>
+      <Impression>
+        http://example.com/imp
+      </Impression>
+      <Creatives>
+        <Creative id="c1">
+          <Linear>
+            <Duration>00:00:10</Duration>
+            <MediaFiles>
+              <MediaFile delivery="progressive" type="video/mp4" width="640" height="360">
+                  https://example.com/ad.mp4
+              </MediaFile>
+            </MediaFiles>
+          </Linear>
+        </Creative>
+      </Creatives>
+    </InLine>
+  </Ad>
+</VAST>"#;
+        let result = parse_vast(xml).unwrap();
+        if let VastAdType::InLine(inline) = &result.ads[0].ad_type {
+            assert_eq!(inline.impression_urls[0], "http://example.com/imp");
+            let url = &inline.creatives[0].linear.as_ref().unwrap().media_files[0].url;
+            assert_eq!(url, "https://example.com/ad.mp4");
+        }
+    }
+
+    #[test]
+    fn multiple_ads_all_parsed() {
+        let xml = r#"<VAST version="3.0">
+  <Ad id="ad-1">
+    <InLine>
+      <AdSystem>Server</AdSystem>
+      <AdTitle>First</AdTitle>
+      <Creatives></Creatives>
+    </InLine>
+  </Ad>
+  <Ad id="ad-2">
+    <InLine>
+      <AdSystem>Server</AdSystem>
+      <AdTitle>Second</AdTitle>
+      <Creatives></Creatives>
+    </InLine>
+  </Ad>
+  <Ad id="ad-3">
+    <InLine>
+      <AdSystem>Server</AdSystem>
+      <AdTitle>Third</AdTitle>
+      <Creatives></Creatives>
+    </InLine>
+  </Ad>
+</VAST>"#;
+        let result = parse_vast(xml).unwrap();
+        assert_eq!(result.ads.len(), 3);
+        assert_eq!(result.ads[0].id, "ad-1");
+        assert_eq!(result.ads[2].id, "ad-3");
+    }
+
+    #[test]
+    fn cdata_in_vast_ad_tag_uri() {
+        let xml = r#"<VAST version="3.0">
+  <Ad id="cdata-test">
+    <Wrapper>
+      <VASTAdTagURI><![CDATA[https://ads.example.com/vast?cb=12345&format=xml]]></VASTAdTagURI>
+      <Impression><![CDATA[https://track.example.com/imp?a=1&b=2]]></Impression>
+    </Wrapper>
+  </Ad>
+</VAST>"#;
+        let result = parse_vast(xml).unwrap();
+        if let VastAdType::Wrapper(wrapper) = &result.ads[0].ad_type {
+            assert_eq!(
+                wrapper.ad_tag_uri,
+                "https://ads.example.com/vast?cb=12345&format=xml"
+            );
+            assert_eq!(
+                wrapper.impression_urls[0],
+                "https://track.example.com/imp?a=1&b=2"
+            );
+        }
+    }
+
+    #[test]
+    fn select_best_media_file_empty_list() {
+        let files: Vec<MediaFile> = vec![];
+        assert!(
+            select_best_media_file(&files).is_none(),
+            "Empty media files should return None"
+        );
+    }
+
+    #[test]
+    fn select_best_media_file_highest_bitrate_fallback() {
+        let files = vec![
+            MediaFile {
+                url: "https://example.com/low.mp4".to_string(),
+                delivery: "progressive".to_string(),
+                mime_type: "video/mp4".to_string(),
+                width: 640,
+                height: 360,
+                bitrate: Some(500),
+                codec: None,
+            },
+            MediaFile {
+                url: "https://example.com/high.mp4".to_string(),
+                delivery: "progressive".to_string(),
+                mime_type: "video/mp4".to_string(),
+                width: 1920,
+                height: 1080,
+                bitrate: Some(5000),
+                codec: None,
+            },
+        ];
+        let best = select_best_media_file(&files).unwrap();
+        assert_eq!(
+            best.url, "https://example.com/high.mp4",
+            "Should pick highest bitrate MP4"
+        );
+    }
 }

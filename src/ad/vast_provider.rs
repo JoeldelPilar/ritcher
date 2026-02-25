@@ -68,6 +68,8 @@ pub struct VastAdProvider {
     http_client: Client,
     /// Per-session ad cache: maps "session_id:break-N-seg-M" to creative URL
     ad_cache: Arc<DashMap<String, ResolvedCreative>>,
+    /// Per-session break counter: tracks next break index for each session
+    break_counter: Arc<DashMap<String, u32>>,
     /// Maximum number of VAST wrapper redirects to follow
     max_wrapper_depth: u32,
     /// VAST request timeout
@@ -87,6 +89,7 @@ impl VastAdProvider {
             vast_endpoint,
             http_client,
             ad_cache: Arc::new(DashMap::new()),
+            break_counter: Arc::new(DashMap::new()),
             max_wrapper_depth: 5,
             timeout: Duration::from_millis(2000),
             slate: None,
@@ -257,6 +260,7 @@ impl std::fmt::Debug for VastAdProvider {
             .field("max_wrapper_depth", &self.max_wrapper_depth)
             .field("timeout", &self.timeout)
             .field("cached_entries", &self.ad_cache.len())
+            .field("active_sessions", &self.break_counter.len())
             .field("has_slate", &self.slate.is_some())
             .finish()
     }
@@ -317,7 +321,15 @@ impl AdProvider for VastAdProvider {
 
         // Build ad segments and cache them for resolve_segment_url
         let mut segments = Vec::new();
-        let break_idx = 0; // TODO: track break index per session
+        let break_idx = {
+            let mut counter = self
+                .break_counter
+                .entry(session_id.to_string())
+                .or_insert(0);
+            let idx = *counter;
+            *counter += 1;
+            idx
+        };
         let total_segments = creatives.len();
 
         for (seg_idx, creative) in creatives.iter().enumerate() {
@@ -362,7 +374,7 @@ impl AdProvider for VastAdProvider {
         segments
     }
 
-    fn resolve_segment_url(&self, ad_name: &str) -> Option<String> {
+    fn resolve_segment_url(&self, ad_name: &str, session_id: &str) -> Option<String> {
         // Check if this is a slate segment
         if ad_name.starts_with("slate-seg-") {
             if let Some(slate) = &self.slate {
@@ -372,12 +384,10 @@ impl AdProvider for VastAdProvider {
             return None;
         }
 
-        // Search across all sessions for this ad_name.
-        // Ad names include break and segment indices, making them unique enough.
-        for entry in self.ad_cache.iter() {
-            if entry.key().ends_with(&format!(":{}", ad_name)) {
-                return Some(entry.value().url.clone());
-            }
+        // Direct O(1) cache lookup using session_id + ad_name
+        let cache_key = Self::cache_key(session_id, ad_name);
+        if let Some(entry) = self.ad_cache.get(&cache_key) {
+            return Some(entry.url.clone());
         }
 
         warn!("VastAdProvider: No cached creative found for {}", ad_name);
@@ -460,6 +470,15 @@ impl AdProvider for VastAdProvider {
                 after
             );
         }
+
+        // Clean up break counters for sessions with no remaining cache entries
+        let active_sessions: std::collections::HashSet<String> = self
+            .ad_cache
+            .iter()
+            .filter_map(|e| e.key().split(':').next().map(String::from))
+            .collect();
+        self.break_counter
+            .retain(|session_id, _| active_sessions.contains(session_id));
     }
 
     fn resolve_segment_with_tracking(
@@ -557,7 +576,7 @@ mod tests {
         );
 
         assert_eq!(
-            provider.resolve_segment_url("break-0-seg-0.ts"),
+            provider.resolve_segment_url("break-0-seg-0.ts", "session-1"),
             Some("http://cdn.example.com/ad.m3u8".to_string())
         );
     }
@@ -566,7 +585,11 @@ mod tests {
     fn resolve_segment_url_returns_none_for_unknown() {
         let client = Client::new();
         let provider = VastAdProvider::new("http://ads.example.com/vast".to_string(), client);
-        assert!(provider.resolve_segment_url("break-0-seg-99.ts").is_none());
+        assert!(
+            provider
+                .resolve_segment_url("break-0-seg-99.ts", "session-1")
+                .is_none()
+        );
     }
 
     #[test]
@@ -658,6 +681,63 @@ mod tests {
     }
 
     #[test]
+    fn cleanup_cache_also_removes_stale_break_counters() {
+        let client = Client::new();
+        let provider = VastAdProvider::new("http://ads.example.com/vast".to_string(), client);
+
+        // Simulate a session with a break counter but expired cache entries
+        provider
+            .break_counter
+            .insert("expired-session".to_string(), 3);
+        provider.ad_cache.insert(
+            "expired-session:break-0-seg-0.ts".to_string(),
+            ResolvedCreative {
+                url: "http://cdn.example.com/old.m3u8".to_string(),
+                duration: 15.0,
+                is_hls: true,
+                impression_urls: vec![],
+                tracking_events: vec![],
+                error_url: None,
+                total_segments: 1,
+                segment_index: 0,
+                visited: false,
+                inserted_at: Instant::now() - Duration::from_secs(400),
+            },
+        );
+
+        // Active session with fresh cache
+        provider
+            .break_counter
+            .insert("active-session".to_string(), 1);
+        provider.ad_cache.insert(
+            "active-session:break-0-seg-0.ts".to_string(),
+            ResolvedCreative {
+                url: "http://cdn.example.com/new.m3u8".to_string(),
+                duration: 15.0,
+                is_hls: true,
+                impression_urls: vec![],
+                tracking_events: vec![],
+                error_url: None,
+                total_segments: 1,
+                segment_index: 0,
+                visited: false,
+                inserted_at: Instant::now(),
+            },
+        );
+
+        assert_eq!(provider.break_counter.len(), 2);
+        provider.cleanup_cache();
+
+        assert_eq!(
+            provider.break_counter.len(),
+            1,
+            "Expired session's break counter should be cleaned up"
+        );
+        assert!(provider.break_counter.contains_key("active-session"));
+        assert!(!provider.break_counter.contains_key("expired-session"));
+    }
+
+    #[test]
     fn with_slate_configures_slate_provider() {
         use crate::ad::slate::SlateProvider;
 
@@ -721,11 +801,79 @@ mod tests {
         assert_eq!(segments[0].uri, "break-0-seg-0.ts");
 
         // Verify the resolved creative was cached so segment URLs can be resolved
-        let cached_url = provider.resolve_segment_url("break-0-seg-0.ts");
+        let cached_url = provider.resolve_segment_url("break-0-seg-0.ts", "session-vast");
         assert_eq!(
             cached_url,
             Some("http://ad.example.com/ad.m3u8".to_string()),
             "Resolved creative should be cached after get_ad_segments"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_ad_segments_multi_break_uses_unique_indices() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        const VAST_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<VAST version="3.0">
+  <Ad id="ad-001">
+    <InLine>
+      <AdSystem>TestAds</AdSystem>
+      <AdTitle>Test Ad</AdTitle>
+      <Impression>http://impression.example.com/track</Impression>
+      <Creatives>
+        <Creative id="creative-001">
+          <Linear>
+            <Duration>00:00:15</Duration>
+            <MediaFiles>
+              <MediaFile delivery="streaming" type="application/x-mpegURL" width="1280" height="720">
+                http://ad.example.com/ad.m3u8
+              </MediaFile>
+            </MediaFiles>
+          </Linear>
+        </Creative>
+      </Creatives>
+    </InLine>
+  </Ad>
+</VAST>"#;
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(VAST_XML))
+            .mount(&server)
+            .await;
+
+        let client = Client::new();
+        let provider = VastAdProvider::new(server.uri(), client);
+
+        // First ad break for this session
+        let segments1 = provider.get_ad_segments(30.0, "session-multi").await;
+        assert_eq!(segments1[0].uri, "break-0-seg-0.ts");
+
+        // Second ad break for same session — should get break-1, not break-0
+        let segments2 = provider.get_ad_segments(30.0, "session-multi").await;
+        assert_eq!(
+            segments2[0].uri, "break-1-seg-0.ts",
+            "Second break should use break_idx=1, not overwrite break-0"
+        );
+
+        // Both should be independently cached
+        assert!(
+            provider
+                .ad_cache
+                .contains_key("session-multi:break-0-seg-0.ts")
+        );
+        assert!(
+            provider
+                .ad_cache
+                .contains_key("session-multi:break-1-seg-0.ts")
+        );
+
+        // Different session should start at break-0
+        let segments3 = provider.get_ad_segments(30.0, "session-other").await;
+        assert_eq!(
+            segments3[0].uri, "break-0-seg-0.ts",
+            "Different session should start at break-0"
         );
     }
 

@@ -158,31 +158,19 @@ impl SessionManager {
             Backend::Valkey { conn, key_prefix } => {
                 let key = format!("{}:{}", key_prefix, session_id);
                 let mut conn = conn.clone();
-                let json: Option<String> =
-                    match redis::cmd("GET").arg(&key).query_async(&mut conn).await {
-                        Ok(v) => v,
-                        Err(e) => {
-                            error!("Valkey GET failed in touch: {}", e);
-                            return;
-                        }
-                    };
-                if let Some(json) = json {
-                    if let Ok(mut session) = serde_json::from_str::<Session>(&json) {
-                        session.last_accessed = SystemTime::now();
-                        if let Ok(updated) = serde_json::to_string(&session) {
-                            let ttl_secs = self.ttl.as_secs();
-                            if let Err(e) = redis::cmd("SET")
-                                .arg(&key)
-                                .arg(&updated)
-                                .arg("EX")
-                                .arg(ttl_secs)
-                                .query_async::<()>(&mut conn)
-                                .await
-                            {
-                                error!("Valkey SET failed in touch: {}", e);
-                            }
-                        }
-                    }
+                let ttl_secs = self.ttl.as_secs() as i64;
+                // Use EXPIRE to refresh TTL in a single O(1) command instead of
+                // GET → deserialize → modify → serialize → SET.
+                // Trade-off: last_accessed is not updated in the stored JSON, but
+                // the key's TTL accurately reflects session liveness. The field is
+                // only used for diagnostics, not for eviction logic.
+                if let Err(e) = redis::cmd("EXPIRE")
+                    .arg(&key)
+                    .arg(ttl_secs)
+                    .query_async::<i32>(&mut conn)
+                    .await
+                {
+                    error!("Valkey EXPIRE failed in touch: {}", e);
                 }
             }
         }
@@ -240,19 +228,33 @@ impl SessionManager {
             Backend::Valkey { conn, key_prefix } => {
                 let pattern = format!("{}:*", key_prefix);
                 let mut conn = conn.clone();
-                // NOTE: KEYS is O(N) — acceptable for health endpoint at current scale.
-                // Replace with SCAN or atomic counter if session volume exceeds ~10k.
-                match redis::cmd("KEYS")
-                    .arg(&pattern)
-                    .query_async::<Vec<String>>(&mut conn)
-                    .await
-                {
-                    Ok(keys) => keys.len(),
-                    Err(e) => {
-                        error!("Valkey KEYS failed in session_count: {}", e);
-                        0
+                // Use SCAN instead of KEYS to avoid blocking Valkey.
+                // SCAN is cursor-based and yields control between batches.
+                let mut cursor: u64 = 0;
+                let mut count: usize = 0;
+                loop {
+                    let result: (u64, Vec<String>) = match redis::cmd("SCAN")
+                        .arg(cursor)
+                        .arg("MATCH")
+                        .arg(&pattern)
+                        .arg("COUNT")
+                        .arg(100)
+                        .query_async(&mut conn)
+                        .await
+                    {
+                        Ok(r) => r,
+                        Err(e) => {
+                            error!("Valkey SCAN failed in session_count: {}", e);
+                            return 0;
+                        }
+                    };
+                    count += result.1.len();
+                    cursor = result.0;
+                    if cursor == 0 {
+                        break;
                     }
                 }
+                count
             }
         }
     }

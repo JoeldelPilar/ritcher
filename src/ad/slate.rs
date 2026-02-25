@@ -82,7 +82,7 @@ impl AdProvider for SlateProvider {
         self.fill_duration(duration, session_id)
     }
 
-    fn resolve_segment_url(&self, ad_name: &str) -> Option<String> {
+    fn resolve_segment_url(&self, ad_name: &str, _session_id: &str) -> Option<String> {
         self.resolve_segment_url(ad_name)
     }
 }
@@ -156,7 +156,7 @@ mod tests {
         let segments = provider.get_ad_segments(6.0, "session-1").await;
         assert_eq!(segments.len(), 3);
 
-        let url = AdProvider::resolve_segment_url(&provider, "slate-seg-0.ts");
+        let url = AdProvider::resolve_segment_url(&provider, "slate-seg-0.ts", "session-1");
         assert!(url.is_some());
     }
 }

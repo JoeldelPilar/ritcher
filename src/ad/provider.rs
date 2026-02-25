@@ -75,10 +75,11 @@ pub trait AdProvider: Send + Sync {
     ///
     /// # Arguments
     /// * `ad_name` - Ad segment identifier from the playlist
+    /// * `session_id` - Session ID for cache lookup
     ///
     /// # Returns
     /// Full URL to the ad segment, or None if the ad_name is invalid
-    fn resolve_segment_url(&self, ad_name: &str) -> Option<String>;
+    fn resolve_segment_url(&self, ad_name: &str, session_id: &str) -> Option<String>;
 
     /// Resolve segment URL and return tracking context (if available)
     ///
@@ -94,9 +95,9 @@ pub trait AdProvider: Send + Sync {
     fn resolve_segment_with_tracking(
         &self,
         ad_name: &str,
-        _session_id: &str,
+        session_id: &str,
     ) -> Option<ResolvedSegment> {
-        self.resolve_segment_url(ad_name)
+        self.resolve_segment_url(ad_name, session_id)
             .map(|url| ResolvedSegment {
                 url,
                 tracking: None,
@@ -218,7 +219,7 @@ impl AdProvider for StaticAdProvider {
         segments
     }
 
-    fn resolve_segment_url(&self, ad_name: &str) -> Option<String> {
+    fn resolve_segment_url(&self, ad_name: &str, _session_id: &str) -> Option<String> {
         let seg_index = self.parse_segment_index(ad_name)?;
 
         // Map to ad source segment name, cycling through available segments
@@ -293,21 +294,21 @@ mod tests {
 
         // Test basic resolution
         assert_eq!(
-            provider.resolve_segment_url("break-0-seg-0.ts"),
+            provider.resolve_segment_url("break-0-seg-0.ts", "test"),
             Some("https://hls.src.tedm.io/content/ts_h264_480p_1s/out_000.ts".to_string())
         );
         assert_eq!(
-            provider.resolve_segment_url("break-0-seg-3.ts"),
+            provider.resolve_segment_url("break-0-seg-3.ts", "test"),
             Some("https://hls.src.tedm.io/content/ts_h264_480p_1s/out_003.ts".to_string())
         );
 
         // Test cycling (segment 15 wraps to index 5 with segment_count=10)
         assert_eq!(
-            provider.resolve_segment_url("break-1-seg-15.ts"),
+            provider.resolve_segment_url("break-1-seg-15.ts", "test"),
             Some("https://hls.src.tedm.io/content/ts_h264_480p_1s/out_005.ts".to_string())
         );
 
         // Test invalid input
-        assert_eq!(provider.resolve_segment_url("invalid.ts"), None);
+        assert_eq!(provider.resolve_segment_url("invalid.ts", "test"), None);
     }
 }

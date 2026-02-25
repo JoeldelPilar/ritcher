@@ -36,27 +36,33 @@ pub async fn serve_playlist(
 
     info!("Fetching playlist from origin: {}", origin_url);
 
-    // Fetch playlist from origin using shared HTTP client
-    let response = state
-        .http_client
-        .get(origin_url)
-        .send()
-        .await
-        .map_err(|e| {
+    // Try manifest cache first, then fetch from origin
+    let content = if let Some(cached) = state.manifest_cache.get(origin_url) {
+        cached
+    } else {
+        let response = state
+            .http_client
+            .get(origin_url)
+            .send()
+            .await
+            .map_err(|e| {
+                metrics::record_origin_error();
+                crate::error::RitcherError::OriginFetchError(e)
+            })?;
+
+        if !response.status().is_success() {
             metrics::record_origin_error();
-            crate::error::RitcherError::OriginFetchError(e)
-        })?;
+            metrics::record_request("playlist", 502);
+            metrics::record_duration("playlist", start);
+            return Err(crate::error::RitcherError::OriginFetchError(
+                response.error_for_status().unwrap_err(),
+            ));
+        }
 
-    if !response.status().is_success() {
-        metrics::record_origin_error();
-        metrics::record_request("playlist", 502);
-        metrics::record_duration("playlist", start);
-        return Err(crate::error::RitcherError::OriginFetchError(
-            response.error_for_status().unwrap_err(),
-        ));
-    }
-
-    let content = response.text().await?;
+        let body = response.text().await?;
+        state.manifest_cache.insert(origin_url, body.clone());
+        body
+    };
 
     // Parse HLS playlist
     let playlist = parser::parse_hls_playlist(&content)?;
