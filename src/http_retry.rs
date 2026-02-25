@@ -119,6 +119,8 @@ pub async fn fetch_with_retry(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn retry_config_defaults() {
@@ -175,9 +177,6 @@ mod tests {
 
     #[tokio::test]
     async fn succeeds_on_first_attempt() {
-        use wiremock::matchers::method;
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
         let server = MockServer::start().await;
 
         Mock::given(method("GET"))
@@ -198,9 +197,6 @@ mod tests {
 
     #[tokio::test]
     async fn retries_on_server_error_then_succeeds() {
-        use wiremock::matchers::method;
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
         let server = MockServer::start().await;
 
         // 200 fallback (lower priority — mounted first)
@@ -230,9 +226,6 @@ mod tests {
 
     #[tokio::test]
     async fn returns_error_after_all_retries_exhausted() {
-        use wiremock::matchers::method;
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
         let server = MockServer::start().await;
 
         Mock::given(method("GET"))
@@ -253,9 +246,6 @@ mod tests {
 
     #[tokio::test]
     async fn single_attempt_no_retry() {
-        use wiremock::matchers::method;
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
         let server = MockServer::start().await;
 
         Mock::given(method("GET"))
