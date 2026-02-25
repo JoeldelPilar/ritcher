@@ -8,6 +8,7 @@ pub mod config;
 pub mod dash;
 pub mod error;
 pub mod hls;
+pub mod http_retry;
 pub mod metrics;
 pub mod server;
 pub mod session;

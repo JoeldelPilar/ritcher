@@ -1,5 +1,6 @@
 use crate::{
     error::Result,
+    http_retry::{RetryConfig, fetch_with_retry},
     metrics,
     server::{state::AppState, url_validation::validate_origin_url},
 };
@@ -10,12 +11,12 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
-use tracing::{info, warn};
+use std::time::Instant;
+use tracing::info;
 
 /// Proxy video segments from origin to player
 ///
-/// Includes 1 retry with 500ms backoff on fetch failure.
+/// Uses [`fetch_with_retry`] for fault-tolerant HTTP fetching.
 pub async fn serve_segment(
     Path((session_id, segment_path)): Path<(String, String)>,
     Query(params): Query<HashMap<String, String>>,
@@ -40,61 +41,33 @@ pub async fn serve_segment(
 
     info!("Fetching segment from origin: {}", segment_url);
 
-    // Fetch segment with retry logic (1 retry, 500ms backoff)
-    let max_attempts = 2;
-    let mut last_error = None;
+    match fetch_with_retry(&state.http_client, &segment_url, &RetryConfig::default()).await {
+        Ok(response) => {
+            let content_type = response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("video/MP2T")
+                .to_string();
 
-    for attempt in 1..=max_attempts {
-        match state.http_client.get(&segment_url).send().await {
-            Ok(response) if response.status().is_success() => {
-                let content_type = response
-                    .headers()
-                    .get(header::CONTENT_TYPE)
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("video/MP2T")
-                    .to_string();
+            let bytes = response.bytes().await?;
 
-                let bytes = response.bytes().await?;
+            metrics::record_request("segment", 200);
+            metrics::record_duration("segment", start);
 
-                metrics::record_request("segment", 200);
-                metrics::record_duration("segment", start);
-
-                return Ok((
-                    StatusCode::OK,
-                    [(header::CONTENT_TYPE, content_type.as_str())],
-                    Body::from(bytes.to_vec()),
-                )
-                    .into_response());
-            }
-            Ok(response) => {
-                warn!(
-                    "Segment fetch returned status {} (attempt {}/{})",
-                    response.status(),
-                    attempt,
-                    max_attempts
-                );
-                last_error = Some(response.error_for_status().unwrap_err());
-            }
-            Err(e) => {
-                warn!(
-                    "Segment fetch failed: {} (attempt {}/{})",
-                    e, attempt, max_attempts
-                );
-                last_error = Some(e);
-            }
+            Ok((
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, content_type.as_str())],
+                Body::from(bytes.to_vec()),
+            )
+                .into_response())
         }
+        Err(e) => {
+            metrics::record_origin_error();
+            metrics::record_request("segment", 502);
+            metrics::record_duration("segment", start);
 
-        if attempt < max_attempts {
-            warn!("Retrying segment fetch in 500ms...");
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            Err(crate::error::RitcherError::OriginFetchError(e))
         }
     }
-
-    metrics::record_origin_error();
-    metrics::record_request("segment", 502);
-    metrics::record_duration("segment", start);
-
-    Err(crate::error::RitcherError::OriginFetchError(
-        last_error.expect("Should have error after all retries failed"),
-    ))
 }

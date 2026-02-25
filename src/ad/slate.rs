@@ -1,4 +1,5 @@
 use crate::ad::provider::{AdProvider, AdSegment};
+use async_trait::async_trait;
 use tracing::info;
 
 /// Slate provider for fallback content during ad breaks
@@ -75,8 +76,9 @@ impl SlateProvider {
 ///
 /// Used when no VAST endpoint is configured and the operator wants
 /// to serve slate content for all ad breaks. Also useful for testing.
+#[async_trait]
 impl AdProvider for SlateProvider {
-    fn get_ad_segments(&self, duration: f32, session_id: &str) -> Vec<AdSegment> {
+    async fn get_ad_segments(&self, duration: f32, session_id: &str) -> Vec<AdSegment> {
         self.fill_duration(duration, session_id)
     }
 
@@ -146,12 +148,12 @@ mod tests {
         assert_eq!(provider.resolve_segment_url("break-0-seg-0.ts"), None);
     }
 
-    #[test]
-    fn test_ad_provider_trait() {
+    #[tokio::test]
+    async fn test_ad_provider_trait() {
         let provider = SlateProvider::new("https://slate.example.com".to_string(), 2.0);
 
         // Test via AdProvider trait
-        let segments = provider.get_ad_segments(6.0, "session-1");
+        let segments = provider.get_ad_segments(6.0, "session-1").await;
         assert_eq!(segments.len(), 3);
 
         let url = AdProvider::resolve_segment_url(&provider, "slate-seg-0.ts");

@@ -1,4 +1,5 @@
 use crate::ad::vast::TrackingEvent;
+use async_trait::async_trait;
 use tracing::info;
 
 /// Represents a single ad segment
@@ -53,6 +54,7 @@ pub struct AdCreative {
 ///
 /// Implementations provide ad segments to fill ad breaks of a given duration.
 /// This abstraction allows for different ad decision strategies (static, VAST, VMAP, etc.)
+#[async_trait]
 pub trait AdProvider: Send + Sync {
     /// Get ad segments to fill an ad break of the given duration
     ///
@@ -63,7 +65,7 @@ pub trait AdProvider: Send + Sync {
     /// # Returns
     /// A vector of AdSegment structs. The total duration may be less than, equal to,
     /// or slightly greater than the requested duration.
-    fn get_ad_segments(&self, duration: f32, session_id: &str) -> Vec<AdSegment>;
+    async fn get_ad_segments(&self, duration: f32, session_id: &str) -> Vec<AdSegment>;
 
     /// Resolve an ad segment identifier to its actual source URL
     ///
@@ -116,8 +118,9 @@ pub trait AdProvider: Send + Sync {
     ///
     /// Default implementation adapts the SSAI segment list — one creative per
     /// segment. VAST provider overrides this to return proper creative-level URLs.
-    fn get_ad_creatives(&self, duration: f32, session_id: &str) -> Vec<AdCreative> {
+    async fn get_ad_creatives(&self, duration: f32, session_id: &str) -> Vec<AdCreative> {
         self.get_ad_segments(duration, session_id)
+            .await
             .into_iter()
             .map(|seg| AdCreative {
                 uri: seg.uri,
@@ -183,8 +186,9 @@ impl StaticAdProvider {
     }
 }
 
+#[async_trait]
 impl AdProvider for StaticAdProvider {
-    fn get_ad_segments(&self, duration: f32, session_id: &str) -> Vec<AdSegment> {
+    async fn get_ad_segments(&self, duration: f32, session_id: &str) -> Vec<AdSegment> {
         info!(
             "StaticAdProvider: Generating ad segments for session {} with duration {}s",
             session_id, duration
@@ -230,10 +234,10 @@ impl AdProvider for StaticAdProvider {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_static_ad_provider_exact_duration() {
+    #[tokio::test]
+    async fn test_static_ad_provider_exact_duration() {
         let provider = StaticAdProvider::new("https://ads.example.com".to_string(), 10.0);
-        let segments = provider.get_ad_segments(30.0, "test-session");
+        let segments = provider.get_ad_segments(30.0, "test-session").await;
 
         assert_eq!(segments.len(), 3);
         assert_eq!(segments[0].duration, 10.0);
@@ -243,28 +247,28 @@ mod tests {
         assert_eq!(segments[2].uri, "https://ads.example.com/ad-segment-2.ts");
     }
 
-    #[test]
-    fn test_static_ad_provider_partial_duration() {
+    #[tokio::test]
+    async fn test_static_ad_provider_partial_duration() {
         let provider = StaticAdProvider::new("https://ads.example.com".to_string(), 10.0);
-        let segments = provider.get_ad_segments(25.0, "test-session");
+        let segments = provider.get_ad_segments(25.0, "test-session").await;
 
         // 25 / 10 = 2.5, ceiling = 3 segments
         assert_eq!(segments.len(), 3);
     }
 
-    #[test]
-    fn test_static_ad_provider_min_one_segment() {
+    #[tokio::test]
+    async fn test_static_ad_provider_min_one_segment() {
         let provider = StaticAdProvider::new("https://ads.example.com".to_string(), 10.0);
-        let segments = provider.get_ad_segments(2.0, "test-session");
+        let segments = provider.get_ad_segments(2.0, "test-session").await;
 
         // Even for very short duration, return at least 1 segment
         assert_eq!(segments.len(), 1);
     }
 
-    #[test]
-    fn test_static_ad_provider_zero_duration() {
+    #[tokio::test]
+    async fn test_static_ad_provider_zero_duration() {
         let provider = StaticAdProvider::new("https://ads.example.com".to_string(), 10.0);
-        let segments = provider.get_ad_segments(0.0, "test-session");
+        let segments = provider.get_ad_segments(0.0, "test-session").await;
 
         // Should return at least 1 segment
         assert_eq!(segments.len(), 1);

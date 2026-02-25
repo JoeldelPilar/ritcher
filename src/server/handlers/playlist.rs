@@ -83,7 +83,8 @@ pub async fn serve_playlist(
         state.ad_provider.as_ref(),
         track_type,
         &state.config.stitching_mode,
-    )?;
+    )
+    .await?;
 
     // Serialize to string
     let playlist_str = parser::serialize_playlist(modified_playlist)?;
@@ -111,7 +112,7 @@ pub async fn serve_playlist(
 /// The `stitching_mode` selects the insertion strategy:
 /// - `StitchingMode::Ssai` — replace content segments with ad segments (traditional SSAI)
 /// - `StitchingMode::Sgai` — inject EXT-X-DATERANGE interstitial markers (HLS Interstitials)
-fn process_playlist(
+async fn process_playlist(
     playlist: Playlist,
     session_id: &str,
     base_url: &str,
@@ -153,10 +154,13 @@ fn process_playlist(
                 // Step 2: Get ad segments for each break
                 // For audio tracks, the same muxed ad segments are used — the player
                 // demuxes the audio track from the muxed container
-                let ad_segments_per_break: Vec<_> = ad_breaks
-                    .iter()
-                    .map(|ad_break| ad_provider.get_ad_segments(ad_break.duration, session_id))
-                    .collect();
+                let mut ad_segments_per_break = Vec::with_capacity(ad_breaks.len());
+                for ad_break in &ad_breaks {
+                    let segs = ad_provider
+                        .get_ad_segments(ad_break.duration, session_id)
+                        .await;
+                    ad_segments_per_break.push(segs);
+                }
 
                 // Step 3: Interleave ads into playlist
                 media_playlist = interleaver::interleave_ads(

@@ -72,14 +72,14 @@ pub async fn serve_manifest(
         metrics::record_ad_breaks(ad_breaks.len());
 
         // Step 2: Get ad segments for each break
-        let ad_segments_per_break: Vec<_> = ad_breaks
-            .iter()
-            .map(|ad_break| {
-                state
-                    .ad_provider
-                    .get_ad_segments(ad_break.duration as f32, &session_id)
-            })
-            .collect();
+        let mut ad_segments_per_break = Vec::with_capacity(ad_breaks.len());
+        for ad_break in &ad_breaks {
+            let segs = state
+                .ad_provider
+                .get_ad_segments(ad_break.duration as f32, &session_id)
+                .await;
+            ad_segments_per_break.push(segs);
+        }
 
         // Step 3: Interleave ad Periods into MPD
         mpd = interleaver::interleave_ads_mpd(
