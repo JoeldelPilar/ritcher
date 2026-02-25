@@ -53,6 +53,8 @@ pub struct Config {
     pub valkey_url: Option<String>,
     /// Session TTL in seconds (default: 300)
     pub session_ttl_secs: u64,
+    /// Rate limit: max requests per minute per IP (0 = disabled)
+    pub rate_limit_rpm: u32,
 }
 
 impl Config {
@@ -154,6 +156,11 @@ impl Config {
         };
         let valkey_url = env::var("VALKEY_URL").ok();
 
+        let rate_limit_rpm: u32 = env::var("RATE_LIMIT_RPM")
+            .unwrap_or_else(|_| "0".to_string())
+            .parse()
+            .unwrap_or(0);
+
         Ok(Config {
             port,
             base_url,
@@ -169,6 +176,7 @@ impl Config {
             session_store,
             valkey_url,
             session_ttl_secs,
+            rate_limit_rpm,
         })
     }
 }

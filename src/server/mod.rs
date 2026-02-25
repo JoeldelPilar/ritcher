@@ -1,9 +1,10 @@
 pub mod handlers;
+pub mod rate_limit;
 pub mod state;
 pub mod url_validation;
 
 use crate::config::Config;
-use axum::{Router, routing::get};
+use axum::{Router, middleware, routing::get};
 use metrics_exporter_prometheus::PrometheusBuilder;
 use state::AppState;
 use tower_http::cors::CorsLayer;
@@ -35,6 +36,18 @@ pub async fn build_router(config: Config) -> Router {
             cleanup_ad_provider.cleanup_cache();
         }
     });
+
+    // Spawn background task for rate limiter cleanup (prevents stale IP entries)
+    if let Some(ref limiter) = state.rate_limiter {
+        let cleanup_limiter = limiter.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                cleanup_limiter.cleanup();
+            }
+        });
+    }
 
     let cors = CorsLayer::very_permissive();
 
@@ -71,6 +84,10 @@ pub async fn build_router(config: Config) -> Router {
             "/stitch/{session_id}/asset-list/{break_id}",
             get(handlers::asset_list::serve_asset_list),
         )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit::rate_limit_middleware,
+        ))
         .layer(cors)
         .with_state(state)
 }

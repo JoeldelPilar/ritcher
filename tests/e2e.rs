@@ -42,6 +42,7 @@ async fn start_server(mode: StitchingMode, origin_path: &str) -> SocketAddr {
         session_store: SessionStoreType::Memory,
         valkey_url: None,
         session_ttl_secs: 300,
+        rate_limit_rpm: 0,
     };
 
     let app = build_router(config).await;

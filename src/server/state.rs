@@ -2,6 +2,7 @@ use crate::{
     ad::{AdProvider, SlateProvider, StaticAdProvider, VastAdProvider},
     cache::ManifestCache,
     config::{AdProviderType, Config, SessionStoreType},
+    server::rate_limit::RateLimiter,
     session::SessionManager,
 };
 use reqwest::Client;
@@ -22,6 +23,8 @@ pub struct AppState {
     pub ad_provider: Arc<dyn AdProvider>,
     /// Short-TTL cache for origin manifests (deduplicates concurrent fetches)
     pub manifest_cache: ManifestCache,
+    /// Optional per-IP rate limiter (None when RATE_LIMIT_RPM=0)
+    pub rate_limiter: Option<RateLimiter>,
     /// Server start time for uptime tracking
     pub started_at: Instant,
 }
@@ -95,12 +98,24 @@ impl AppState {
             }
         };
 
+        let rate_limiter = if config.rate_limit_rpm > 0 {
+            info!(
+                "Rate limiter: {} requests/min per IP",
+                config.rate_limit_rpm
+            );
+            Some(RateLimiter::new(config.rate_limit_rpm))
+        } else {
+            info!("Rate limiter: disabled");
+            None
+        };
+
         Self {
             config: Arc::new(config),
             http_client,
             sessions,
             ad_provider,
             manifest_cache: ManifestCache::new(),
+            rate_limiter,
             started_at: Instant::now(),
         }
     }
