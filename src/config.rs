@@ -172,3 +172,214 @@ impl Config {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Serialize all env-var tests to prevent races between parallel test threads.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Set env vars, run `f`, then restore original state.
+    ///
+    /// `set` — vars to set; `unset` — vars to remove before running `f`.
+    fn with_env(set: &[(&str, &str)], unset: &[&str], f: impl FnOnce()) {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        // Save state for all touched vars
+        let save_set: Vec<(&str, Option<String>)> =
+            set.iter().map(|(k, _)| (*k, std::env::var(k).ok())).collect();
+        let save_unset: Vec<(&str, Option<String>)> =
+            unset.iter().map(|k| (*k, std::env::var(k).ok())).collect();
+
+        for (k, v) in set {
+            // SAFETY: serialized by ENV_LOCK — no other thread modifies env vars concurrently.
+            unsafe { std::env::set_var(k, v) };
+        }
+        for k in unset {
+            unsafe { std::env::remove_var(k) };
+        }
+
+        f();
+
+        // Restore
+        for (k, old) in save_set.into_iter().chain(save_unset) {
+            match old {
+                Some(v) => unsafe { std::env::set_var(k, v) },
+                None => unsafe { std::env::remove_var(k) },
+            }
+        }
+    }
+
+    #[test]
+    fn dev_mode_uses_defaults() {
+        with_env(
+            &[("DEV_MODE", "true")],
+            &[
+                "PORT",
+                "BASE_URL",
+                "ORIGIN_URL",
+                "STITCHING_MODE",
+                "VAST_ENDPOINT",
+                "AD_PROVIDER_TYPE",
+                "SESSION_STORE",
+                "SESSION_TTL_SECS",
+            ],
+            || {
+                let config = Config::from_env().expect("should succeed in dev mode");
+                assert!(config.is_dev);
+                assert_eq!(config.port, 3000);
+                assert_eq!(config.base_url, "http://localhost:3000");
+                assert_eq!(config.origin_url, "https://example.com");
+                assert_eq!(config.stitching_mode, StitchingMode::Ssai);
+                assert_eq!(config.ad_provider_type, AdProviderType::Static);
+                assert_eq!(config.session_store, SessionStoreType::Memory);
+                assert_eq!(config.session_ttl_secs, 300);
+            },
+        );
+    }
+
+    #[test]
+    fn prod_mode_requires_port() {
+        with_env(&[], &["DEV_MODE", "PORT", "BASE_URL", "ORIGIN_URL"], || {
+            let result = Config::from_env();
+            assert!(result.is_err(), "Should fail without PORT in prod mode");
+        });
+    }
+
+    #[test]
+    fn prod_mode_requires_base_url() {
+        with_env(
+            &[("PORT", "8080")],
+            &["DEV_MODE", "BASE_URL", "ORIGIN_URL"],
+            || {
+                let result = Config::from_env();
+                assert!(result.is_err(), "Should fail without BASE_URL in prod mode");
+            },
+        );
+    }
+
+    #[test]
+    fn prod_mode_requires_origin_url() {
+        with_env(
+            &[("PORT", "8080"), ("BASE_URL", "https://example.com")],
+            &["DEV_MODE", "ORIGIN_URL"],
+            || {
+                let result = Config::from_env();
+                assert!(result.is_err(), "Should fail without ORIGIN_URL in prod mode");
+            },
+        );
+    }
+
+    #[test]
+    fn vast_auto_detect_from_endpoint() {
+        with_env(
+            &[
+                ("DEV_MODE", "true"),
+                ("VAST_ENDPOINT", "https://ads.example.com/vast"),
+            ],
+            &["AD_PROVIDER_TYPE"],
+            || {
+                let config = Config::from_env().unwrap();
+                assert_eq!(config.ad_provider_type, AdProviderType::Vast);
+                assert_eq!(
+                    config.vast_endpoint,
+                    Some("https://ads.example.com/vast".to_string())
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn explicit_static_overrides_vast_endpoint() {
+        with_env(
+            &[
+                ("DEV_MODE", "true"),
+                ("VAST_ENDPOINT", "https://ads.example.com/vast"),
+                ("AD_PROVIDER_TYPE", "static"),
+            ],
+            &[],
+            || {
+                let config = Config::from_env().unwrap();
+                assert_eq!(config.ad_provider_type, AdProviderType::Static);
+            },
+        );
+    }
+
+    #[test]
+    fn stitching_mode_sgai() {
+        with_env(
+            &[("DEV_MODE", "true"), ("STITCHING_MODE", "sgai")],
+            &[],
+            || {
+                let config = Config::from_env().unwrap();
+                assert_eq!(config.stitching_mode, StitchingMode::Sgai);
+            },
+        );
+    }
+
+    #[test]
+    fn stitching_mode_defaults_to_ssai() {
+        with_env(&[("DEV_MODE", "true")], &["STITCHING_MODE"], || {
+            let config = Config::from_env().unwrap();
+            assert_eq!(config.stitching_mode, StitchingMode::Ssai);
+        });
+    }
+
+    #[test]
+    fn session_store_valkey() {
+        with_env(
+            &[("DEV_MODE", "true"), ("SESSION_STORE", "valkey")],
+            &[],
+            || {
+                let config = Config::from_env().unwrap();
+                assert_eq!(config.session_store, SessionStoreType::Valkey);
+            },
+        );
+    }
+
+    #[test]
+    fn session_store_redis_alias() {
+        with_env(
+            &[("DEV_MODE", "true"), ("SESSION_STORE", "redis")],
+            &[],
+            || {
+                let config = Config::from_env().unwrap();
+                assert_eq!(config.session_store, SessionStoreType::Valkey);
+            },
+        );
+    }
+
+    #[test]
+    fn session_store_defaults_to_memory() {
+        with_env(&[("DEV_MODE", "true")], &["SESSION_STORE"], || {
+            let config = Config::from_env().unwrap();
+            assert_eq!(config.session_store, SessionStoreType::Memory);
+        });
+    }
+
+    #[test]
+    fn session_ttl_parsed() {
+        with_env(
+            &[("DEV_MODE", "true"), ("SESSION_TTL_SECS", "600")],
+            &[],
+            || {
+                let config = Config::from_env().unwrap();
+                assert_eq!(config.session_ttl_secs, 600);
+            },
+        );
+    }
+
+    #[test]
+    fn ad_segment_duration_parsed() {
+        with_env(
+            &[("DEV_MODE", "true"), ("AD_SEGMENT_DURATION", "2.5")],
+            &[],
+            || {
+                let config = Config::from_env().unwrap();
+                assert_eq!(config.ad_segment_duration, 2.5);
+            },
+        );
+    }
+}
