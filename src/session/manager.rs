@@ -158,31 +158,19 @@ impl SessionManager {
             Backend::Valkey { conn, key_prefix } => {
                 let key = format!("{}:{}", key_prefix, session_id);
                 let mut conn = conn.clone();
-                let json: Option<String> =
-                    match redis::cmd("GET").arg(&key).query_async(&mut conn).await {
-                        Ok(v) => v,
-                        Err(e) => {
-                            error!("Valkey GET failed in touch: {}", e);
-                            return;
-                        }
-                    };
-                if let Some(json) = json {
-                    if let Ok(mut session) = serde_json::from_str::<Session>(&json) {
-                        session.last_accessed = SystemTime::now();
-                        if let Ok(updated) = serde_json::to_string(&session) {
-                            let ttl_secs = self.ttl.as_secs();
-                            if let Err(e) = redis::cmd("SET")
-                                .arg(&key)
-                                .arg(&updated)
-                                .arg("EX")
-                                .arg(ttl_secs)
-                                .query_async::<()>(&mut conn)
-                                .await
-                            {
-                                error!("Valkey SET failed in touch: {}", e);
-                            }
-                        }
-                    }
+                let ttl_secs = self.ttl.as_secs() as i64;
+                // Use EXPIRE to refresh TTL in a single O(1) command instead of
+                // GET → deserialize → modify → serialize → SET.
+                // Trade-off: last_accessed is not updated in the stored JSON, but
+                // the key's TTL accurately reflects session liveness. The field is
+                // only used for diagnostics, not for eviction logic.
+                if let Err(e) = redis::cmd("EXPIRE")
+                    .arg(&key)
+                    .arg(ttl_secs)
+                    .query_async::<i32>(&mut conn)
+                    .await
+                {
+                    error!("Valkey EXPIRE failed in touch: {}", e);
                 }
             }
         }
