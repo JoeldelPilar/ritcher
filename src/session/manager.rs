@@ -240,19 +240,33 @@ impl SessionManager {
             Backend::Valkey { conn, key_prefix } => {
                 let pattern = format!("{}:*", key_prefix);
                 let mut conn = conn.clone();
-                // NOTE: KEYS is O(N) — acceptable for health endpoint at current scale.
-                // Replace with SCAN or atomic counter if session volume exceeds ~10k.
-                match redis::cmd("KEYS")
-                    .arg(&pattern)
-                    .query_async::<Vec<String>>(&mut conn)
-                    .await
-                {
-                    Ok(keys) => keys.len(),
-                    Err(e) => {
-                        error!("Valkey KEYS failed in session_count: {}", e);
-                        0
+                // Use SCAN instead of KEYS to avoid blocking Valkey.
+                // SCAN is cursor-based and yields control between batches.
+                let mut cursor: u64 = 0;
+                let mut count: usize = 0;
+                loop {
+                    let result: (u64, Vec<String>) = match redis::cmd("SCAN")
+                        .arg(cursor)
+                        .arg("MATCH")
+                        .arg(&pattern)
+                        .arg("COUNT")
+                        .arg(100)
+                        .query_async(&mut conn)
+                        .await
+                    {
+                        Ok(r) => r,
+                        Err(e) => {
+                            error!("Valkey SCAN failed in session_count: {}", e);
+                            return 0;
+                        }
+                    };
+                    count += result.1.len();
+                    cursor = result.0;
+                    if cursor == 0 {
+                        break;
                     }
                 }
+                count
             }
         }
     }
