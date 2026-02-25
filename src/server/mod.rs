@@ -4,11 +4,29 @@ pub mod state;
 pub mod url_validation;
 
 use crate::config::Config;
-use axum::{Router, middleware, routing::get};
+use axum::{
+    Router,
+    extract::Request,
+    http::header::HeaderValue,
+    middleware::{self, Next},
+    response::Response,
+    routing::get,
+};
 use metrics_exporter_prometheus::PrometheusBuilder;
 use state::AppState;
 use tower_http::cors::CorsLayer;
 use tracing::{error, info};
+
+/// Version header value — resolved at compile time from Cargo.toml.
+static VERSION: HeaderValue = HeaderValue::from_static(env!("CARGO_PKG_VERSION"));
+
+/// Middleware: set `X-Ritcher-Version` on every response.
+async fn version_header(req: Request, next: Next) -> Response {
+    let mut resp = next.run(req).await;
+    resp.headers_mut()
+        .insert("x-ritcher-version", VERSION.clone());
+    resp
+}
 
 /// Build the Axum router with all routes and shared state
 ///
@@ -84,6 +102,7 @@ pub async fn build_router(config: Config) -> Router {
             "/stitch/{session_id}/asset-list/{break_id}",
             get(handlers::asset_list::serve_asset_list),
         )
+        .layer(middleware::from_fn(version_header))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             rate_limit::rate_limit_middleware,
