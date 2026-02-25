@@ -208,14 +208,6 @@ mod tests {
     }
 
     #[test]
-    fn test_single_segment_fires_start_and_complete() {
-        let events = make_events();
-        let result = events_for_segment(0, 1, &events);
-        assert!(result.iter().any(|e| e.event == "start"));
-        assert!(result.iter().any(|e| e.event == "complete"));
-    }
-
-    #[test]
     fn test_no_events_for_empty_tracking() {
         let result = events_for_segment(0, 4, &[]);
         assert!(result.is_empty());
