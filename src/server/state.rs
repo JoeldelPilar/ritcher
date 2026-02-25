@@ -1,5 +1,6 @@
 use crate::{
     ad::{AdProvider, SlateProvider, StaticAdProvider, VastAdProvider},
+    cache::ManifestCache,
     config::{AdProviderType, Config, SessionStoreType},
     session::SessionManager,
 };
@@ -19,6 +20,8 @@ pub struct AppState {
     pub sessions: SessionManager,
     /// Ad provider for serving ad content (trait object for runtime flexibility)
     pub ad_provider: Arc<dyn AdProvider>,
+    /// Short-TTL cache for origin manifests (deduplicates concurrent fetches)
+    pub manifest_cache: ManifestCache,
     /// Server start time for uptime tracking
     pub started_at: Instant,
 }
@@ -97,6 +100,7 @@ impl AppState {
             http_client,
             sessions,
             ad_provider,
+            manifest_cache: ManifestCache::new(),
             started_at: Instant::now(),
         }
     }

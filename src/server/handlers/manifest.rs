@@ -33,27 +33,33 @@ pub async fn serve_manifest(
 
     info!("Fetching MPD from origin: {}", origin_url);
 
-    // Fetch MPD from origin using shared HTTP client
-    let response = state
-        .http_client
-        .get(origin_url)
-        .send()
-        .await
-        .map_err(|e| {
+    // Try manifest cache first, then fetch from origin
+    let content = if let Some(cached) = state.manifest_cache.get(origin_url) {
+        cached
+    } else {
+        let response = state
+            .http_client
+            .get(origin_url)
+            .send()
+            .await
+            .map_err(|e| {
+                metrics::record_origin_error();
+                crate::error::RitcherError::OriginFetchError(e)
+            })?;
+
+        if !response.status().is_success() {
             metrics::record_origin_error();
-            crate::error::RitcherError::OriginFetchError(e)
-        })?;
+            metrics::record_request("manifest", 502);
+            metrics::record_duration("manifest", start);
+            return Err(crate::error::RitcherError::OriginFetchError(
+                response.error_for_status().unwrap_err(),
+            ));
+        }
 
-    if !response.status().is_success() {
-        metrics::record_origin_error();
-        metrics::record_request("manifest", 502);
-        metrics::record_duration("manifest", start);
-        return Err(crate::error::RitcherError::OriginFetchError(
-            response.error_for_status().unwrap_err(),
-        ));
-    }
-
-    let content = response.text().await?;
+        let body = response.text().await?;
+        state.manifest_cache.insert(origin_url, body.clone());
+        body
+    };
 
     // Parse DASH MPD
     let mut mpd = parser::parse_mpd(&content)?;

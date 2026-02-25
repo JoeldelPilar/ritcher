@@ -4,6 +4,7 @@
 //! The binary entry point is in main.rs.
 
 pub mod ad;
+pub mod cache;
 pub mod config;
 pub mod dash;
 pub mod error;
