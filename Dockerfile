@@ -1,5 +1,5 @@
 # Stage 1: Build
-FROM rust:1.91-slim AS builder
+FROM rust:1.91-bookworm AS builder
 
 WORKDIR /usr/src/ritcher
 
@@ -13,12 +13,17 @@ RUN apt-get update && apt-get install -y \
 # Copy manifests first for dependency caching
 COPY Cargo.toml Cargo.lock ./
 
-# Create dummy main.rs to build dependencies
-RUN mkdir src && echo "fn main() {}" > src/main.rs
-RUN cargo build --release && rm -rf src
+# Create dummy sources to pre-build dependencies (layer caching)
+RUN mkdir src && echo "fn main() {}" > src/main.rs && \
+    mkdir benches && \
+    echo "fn main() {}" > benches/manifest_pipeline.rs && \
+    echo "fn main() {}" > benches/vast_parsing.rs
+RUN cargo build --release && rm -rf src benches
 
 # Copy actual source code
 COPY src/ src/
+COPY benches/ benches/
+COPY tests/ tests/
 
 # Build the real binary (touch main.rs to force rebuild)
 RUN touch src/main.rs && cargo build --release
