@@ -6,6 +6,6 @@ pub mod tracking;
 pub mod vast;
 pub mod vast_provider;
 
-pub use provider::{AdProvider, StaticAdProvider};
+pub use provider::{AdProvider, DemoAdProvider, StaticAdProvider};
 pub use slate::SlateProvider;
 pub use vast_provider::VastAdProvider;

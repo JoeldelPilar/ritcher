@@ -1,5 +1,5 @@
 use crate::{
-    ad::{AdProvider, SlateProvider, StaticAdProvider, VastAdProvider},
+    ad::{AdProvider, DemoAdProvider, SlateProvider, StaticAdProvider, VastAdProvider},
     cache::ManifestCache,
     config::{AdProviderType, Config, SessionStoreType},
     server::rate_limit::RateLimiter,
@@ -95,6 +95,18 @@ impl AppState {
                     config.ad_source_url.clone(),
                     config.ad_segment_duration,
                 ))
+            }
+            AdProviderType::Demo => {
+                let base_url = config
+                    .demo_ad_base_url
+                    .as_deref()
+                    .unwrap_or("http://localhost:3333/ads");
+                info!(
+                    "Ad provider: Demo ({} creatives at {})",
+                    DemoAdProvider::NUM_CREATIVES,
+                    base_url
+                );
+                Arc::new(DemoAdProvider::new(base_url))
             }
         };
 
