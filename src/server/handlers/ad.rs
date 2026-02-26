@@ -73,8 +73,7 @@ pub async fn serve_ad(
                 .unwrap_or("video/MP2T")
                 .to_string();
 
-            let bytes = response.bytes().await?;
-            info!("Ad segment {} fetched: {} bytes", ad_name, bytes.len());
+            info!("Ad segment {} streaming from upstream", ad_name);
 
             metrics::record_request("ad", 200);
             metrics::record_duration("ad", start);
@@ -82,7 +81,7 @@ pub async fn serve_ad(
             Ok((
                 StatusCode::OK,
                 [(header::CONTENT_TYPE, content_type.as_str())],
-                Body::from(bytes.to_vec()),
+                Body::from_stream(response.bytes_stream()),
             )
                 .into_response())
         }

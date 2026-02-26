@@ -50,15 +50,13 @@ pub async fn serve_segment(
                 .unwrap_or("video/MP2T")
                 .to_string();
 
-            let bytes = response.bytes().await?;
-
             metrics::record_request("segment", 200);
             metrics::record_duration("segment", start);
 
             Ok((
                 StatusCode::OK,
                 [(header::CONTENT_TYPE, content_type.as_str())],
-                Body::from(bytes.to_vec()),
+                Body::from_stream(response.bytes_stream()),
             )
                 .into_response())
         }
