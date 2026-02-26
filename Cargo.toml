@@ -2,6 +2,9 @@
 name = "ritcher"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+description = "High-performance HLS & DASH SSAI/SGAI ad insertion stitcher"
+repository = "https://github.com/JoeldelPilar/ritcher"
 
 [features]
 default = []
