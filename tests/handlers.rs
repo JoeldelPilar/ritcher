@@ -30,6 +30,7 @@ fn test_config() -> Config {
         valkey_url: None,
         session_ttl_secs: 300,
         rate_limit_rpm: 0,
+        demo_ad_base_url: None,
     }
 }
 

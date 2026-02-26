@@ -24,6 +24,8 @@ pub enum AdProviderType {
     Static,
     /// VAST-based ad provider fetching from an ad server
     Vast,
+    /// Demo ad provider with 5 visually distinct creatives per break
+    Demo,
 }
 
 /// Application configuration loaded from environment variables
@@ -55,6 +57,8 @@ pub struct Config {
     pub session_ttl_secs: u64,
     /// Rate limit: max requests per minute per IP (0 = disabled)
     pub rate_limit_rpm: u32,
+    /// Base URL for demo ad creatives (used when ad_provider_type = Demo)
+    pub demo_ad_base_url: Option<String>,
 }
 
 impl Config {
@@ -105,6 +109,9 @@ impl Config {
         // VAST endpoint URL (optional)
         let vast_endpoint = env::var("VAST_ENDPOINT").ok();
 
+        // Demo ad base URL (for DemoAdProvider creative sources)
+        let demo_ad_base_url = env::var("DEMO_AD_BASE_URL").ok();
+
         // Ad provider type: auto-detect from VAST_ENDPOINT or explicit AD_PROVIDER_TYPE
         let ad_provider_type = match env::var("AD_PROVIDER_TYPE")
             .unwrap_or_else(|_| "auto".to_string())
@@ -113,6 +120,7 @@ impl Config {
         {
             "vast" => AdProviderType::Vast,
             "static" => AdProviderType::Static,
+            "demo" => AdProviderType::Demo,
             _ => {
                 // Auto-detect: use VAST if endpoint is configured, otherwise static
                 if vast_endpoint.is_some() {
@@ -177,6 +185,7 @@ impl Config {
             valkey_url,
             session_ttl_secs,
             rate_limit_rpm,
+            demo_ad_base_url,
         })
     }
 }

@@ -231,6 +231,109 @@ impl AdProvider for StaticAdProvider {
     }
 }
 
+/// Demo ad provider that serves visually different ad creatives per break
+///
+/// Each break index maps to a different ad source URL from a list of
+/// creative sources, producing visually distinct ads for customer demos.
+/// Uses the break index encoded in the segment name (`break-{idx}-seg-{idx}.ts`)
+/// to select the creative source.
+#[derive(Clone, Debug)]
+pub struct DemoAdProvider {
+    /// Ad source URLs indexed by break number (cycled if more breaks than sources)
+    creative_sources: Vec<String>,
+    /// Duration of each ad segment in seconds
+    segment_duration: f32,
+    /// Number of available segments per source (for cycling)
+    segment_count: usize,
+}
+
+impl DemoAdProvider {
+    /// Number of built-in demo creatives
+    pub const NUM_CREATIVES: usize = 5;
+
+    /// Create a DemoAdProvider with creative sources at the given base URL.
+    ///
+    /// Expects 5 creative directories at `{base_url}/creative-{1..5}/`
+    /// each containing segments named `out_000.ts` through `out_009.ts`.
+    pub fn new(base_url: &str) -> Self {
+        let base = base_url.trim_end_matches('/');
+        let creative_sources = (1..=Self::NUM_CREATIVES)
+            .map(|i| format!("{}/creative-{}", base, i))
+            .collect();
+
+        Self {
+            creative_sources,
+            segment_duration: 1.0,
+            segment_count: 10,
+        }
+    }
+
+    /// Parse break index and segment index from ad name like "break-2-seg-5.ts"
+    fn parse_ad_name(ad_name: &str) -> Option<(usize, usize)> {
+        let name = ad_name.strip_suffix(".ts").unwrap_or(ad_name);
+        let parts: Vec<&str> = name.split('-').collect();
+
+        // Expected format: ["break", "2", "seg", "5"]
+        if parts.len() >= 4 && parts[0] == "break" && parts[2] == "seg" {
+            let break_idx = parts[1].parse().ok()?;
+            let seg_idx = parts[3].parse().ok()?;
+            Some((break_idx, seg_idx))
+        } else {
+            None
+        }
+    }
+}
+
+#[async_trait]
+impl AdProvider for DemoAdProvider {
+    async fn get_ad_segments(&self, duration: f32, session_id: &str) -> Vec<AdSegment> {
+        info!(
+            "DemoAdProvider: Generating ad segments for session {} with duration {}s",
+            session_id, duration
+        );
+
+        let num_segments = (duration / self.segment_duration).ceil() as usize;
+        let num_segments = num_segments.max(1);
+
+        let segments: Vec<AdSegment> = (0..num_segments)
+            .map(|i| AdSegment {
+                uri: format!("{}/ad-segment-{}.ts", self.creative_sources[0], i),
+                duration: self.segment_duration,
+                tracking: None,
+            })
+            .collect();
+
+        info!(
+            "DemoAdProvider: Generated {} ad segments (total: {}s)",
+            segments.len(),
+            segments.len() as f32 * self.segment_duration
+        );
+
+        segments
+    }
+
+    fn resolve_segment_url(&self, ad_name: &str, _session_id: &str) -> Option<String> {
+        let (break_idx, seg_idx) = Self::parse_ad_name(ad_name)?;
+
+        // Select creative source based on break index (cycling through 5 creatives)
+        let source = &self.creative_sources[break_idx % self.creative_sources.len()];
+
+        // Map to segment name, cycling through available segments
+        let source_index = seg_idx % self.segment_count;
+        let source_segment = format!("out_{:03}.ts", source_index);
+
+        info!(
+            "DemoAdProvider: break {} → creative {}, seg {} → {}",
+            break_idx,
+            (break_idx % self.creative_sources.len()) + 1,
+            seg_idx,
+            source_segment
+        );
+
+        Some(format!("{}/{}", source, source_segment))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -310,5 +413,92 @@ mod tests {
 
         // Test invalid input
         assert_eq!(provider.resolve_segment_url("invalid.ts", "test"), None);
+    }
+
+    // === DemoAdProvider tests ===
+
+    #[test]
+    fn test_demo_parse_ad_name() {
+        assert_eq!(
+            DemoAdProvider::parse_ad_name("break-0-seg-0.ts"),
+            Some((0, 0))
+        );
+        assert_eq!(
+            DemoAdProvider::parse_ad_name("break-2-seg-5.ts"),
+            Some((2, 5))
+        );
+        assert_eq!(
+            DemoAdProvider::parse_ad_name("break-4-seg-15.ts"),
+            Some((4, 15))
+        );
+        assert_eq!(DemoAdProvider::parse_ad_name("invalid.ts"), None);
+        assert_eq!(DemoAdProvider::parse_ad_name("break-0.ts"), None);
+    }
+
+    #[test]
+    fn test_demo_ad_provider_per_break_routing() {
+        let provider = DemoAdProvider::new("http://localhost:3333/ads");
+
+        // Break 0 → creative-1
+        assert_eq!(
+            provider.resolve_segment_url("break-0-seg-0.ts", "test"),
+            Some("http://localhost:3333/ads/creative-1/out_000.ts".to_string())
+        );
+
+        // Break 1 → creative-2
+        assert_eq!(
+            provider.resolve_segment_url("break-1-seg-3.ts", "test"),
+            Some("http://localhost:3333/ads/creative-2/out_003.ts".to_string())
+        );
+
+        // Break 2 → creative-3
+        assert_eq!(
+            provider.resolve_segment_url("break-2-seg-0.ts", "test"),
+            Some("http://localhost:3333/ads/creative-3/out_000.ts".to_string())
+        );
+
+        // Break 4 → creative-5
+        assert_eq!(
+            provider.resolve_segment_url("break-4-seg-7.ts", "test"),
+            Some("http://localhost:3333/ads/creative-5/out_007.ts".to_string())
+        );
+    }
+
+    #[test]
+    fn test_demo_ad_provider_cycling() {
+        let provider = DemoAdProvider::new("http://localhost:3333/ads");
+
+        // Break 5 → wraps to creative-1 (5 % 5 = 0 → index 0 → creative-1)
+        assert_eq!(
+            provider.resolve_segment_url("break-5-seg-0.ts", "test"),
+            Some("http://localhost:3333/ads/creative-1/out_000.ts".to_string())
+        );
+
+        // Break 6 → wraps to creative-2
+        assert_eq!(
+            provider.resolve_segment_url("break-6-seg-0.ts", "test"),
+            Some("http://localhost:3333/ads/creative-2/out_000.ts".to_string())
+        );
+    }
+
+    #[test]
+    fn test_demo_ad_provider_segment_cycling() {
+        let provider = DemoAdProvider::new("http://localhost:3333/ads");
+
+        // Segment 15 → wraps to out_005 (15 % 10 = 5)
+        assert_eq!(
+            provider.resolve_segment_url("break-0-seg-15.ts", "test"),
+            Some("http://localhost:3333/ads/creative-1/out_005.ts".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_demo_ad_provider_get_segments() {
+        let provider = DemoAdProvider::new("http://localhost:3333/ads");
+        let segments = provider.get_ad_segments(10.0, "test").await;
+
+        assert_eq!(segments.len(), 10);
+        assert_eq!(segments[0].duration, 1.0);
+        assert!(segments[0].tracking.is_none());
     }
 }

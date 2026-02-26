@@ -43,6 +43,7 @@ async fn start_server(mode: StitchingMode, origin_path: &str) -> SocketAddr {
         valkey_url: None,
         session_ttl_secs: 300,
         rate_limit_rpm: 0,
+        demo_ad_base_url: None,
     };
 
     let app = build_router(config).await;
