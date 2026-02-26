@@ -15,10 +15,10 @@ const MUX_SEGMENT: &str = "193039199_mp4_h264_aac_hd_7.ts";
 const MUX_START_INDEX: u32 = 462;
 /// Duration of each segment in seconds
 const SEGMENT_DURATION: f32 = 10.0;
-/// Duration of each ad break in seconds
-const BREAK_DURATION: u32 = 30;
-/// Number of segments per ad break (30s / 10s)
-const BREAK_SEGMENTS: u32 = 3;
+/// Duration of each ad break in seconds (matches DemoAdProvider: 10 × 1s segments)
+const BREAK_DURATION: u32 = 10;
+/// Number of placeholder content segments per ad break (10s / 10s = 1)
+const BREAK_SEGMENTS: u32 = 1;
 
 /// Query parameters for configurable demo endpoints
 #[derive(Debug, Deserialize)]
@@ -86,7 +86,10 @@ fn build_demo_hls(num_breaks: u8, interval_secs: u8) -> String {
         // CUE-OUT: start of ad break
         let _ = writeln!(playlist, "#EXT-X-CUE-OUT:{}", BREAK_DURATION);
 
-        // Segments within the ad break (these get replaced by the stitcher)
+        // Placeholder segments within the ad break (replaced by the stitcher).
+        // Use the LAST content segment as placeholder — do NOT advance seg_idx,
+        // so content resumes seamlessly after the ad break.
+        let placeholder_idx = seg_idx.saturating_sub(1);
         for cont_idx in 0..BREAK_SEGMENTS {
             if cont_idx > 0 {
                 let elapsed = cont_idx * (SEGMENT_DURATION as u32);
@@ -97,8 +100,7 @@ fn build_demo_hls(num_breaks: u8, interval_secs: u8) -> String {
                 );
             }
             let _ = writeln!(playlist, "#EXTINF:{:.1},", SEGMENT_DURATION);
-            let _ = writeln!(playlist, "{}", mux_segment_url(seg_idx));
-            seg_idx += 1;
+            let _ = writeln!(playlist, "{}", mux_segment_url(placeholder_idx));
         }
 
         // CUE-IN: end of ad break
@@ -227,7 +229,9 @@ fn build_demo_mpd(num_breaks: u8, interval_secs: u8) -> String {
 
         let _ = writeln!(mpd, r#"  </Period>"#);
 
-        seg_start += segs_per_interval + BREAK_SEGMENTS;
+        // Only advance by content segments — break segments are placeholders
+        // that get replaced by the stitcher, so they don't consume content indices
+        seg_start += segs_per_interval;
     }
 
     // Trailing content period (30s)
@@ -400,7 +404,7 @@ mod tests {
 
         // Should have exactly 1 CUE-OUT and 1 CUE-IN
         assert_eq!(
-            playlist.matches("#EXT-X-CUE-OUT:30").count(),
+            playlist.matches("#EXT-X-CUE-OUT:10").count(),
             1,
             "Expected 1 CUE-OUT"
         );
@@ -410,11 +414,11 @@ mod tests {
             "Expected 1 CUE-IN"
         );
 
-        // 15s interval = 1 content seg (10s rounded), then 3 break segs, then 3 trailing
-        // Actually 15/10 = 1.5 → truncated to 1 content segment before break
+        // 15s interval = 1 content seg (10s rounded), then 1 break seg, then 3 trailing
+        // 15/10 = 1.5 → truncated to 1 content segment before break
         let seg_count = playlist.matches("#EXTINF:").count();
-        // 1 content + 3 break + 3 trailing = 7 segments
-        assert_eq!(seg_count, 7, "Expected 7 segments");
+        // 1 content + 1 break + 3 trailing = 5 segments
+        assert_eq!(seg_count, 5, "Expected 5 segments");
 
         assert!(playlist.contains("#EXT-X-ENDLIST"));
     }
@@ -424,13 +428,13 @@ mod tests {
         let playlist = build_demo_hls(5, 20);
 
         // 5 CUE-OUT/CUE-IN pairs
-        assert_eq!(playlist.matches("#EXT-X-CUE-OUT:30").count(), 5);
+        assert_eq!(playlist.matches("#EXT-X-CUE-OUT:10").count(), 5);
         assert_eq!(playlist.matches("#EXT-X-CUE-IN").count(), 5);
 
-        // 20s interval = 2 content segs per break, 3 break segs per break, 3 trailing
-        // 5 * (2 + 3) + 3 = 28 segments
+        // 20s interval = 2 content segs per break, 1 break seg per break, 3 trailing
+        // 5 * (2 + 1) + 3 = 18 segments
         let seg_count = playlist.matches("#EXTINF:").count();
-        assert_eq!(seg_count, 28, "Expected 28 segments for 5 breaks @ 20s");
+        assert_eq!(seg_count, 18, "Expected 18 segments for 5 breaks @ 20s");
     }
 
     #[test]
@@ -506,8 +510,8 @@ mod tests {
         // First period starts at 462
         assert!(mpd.contains(r#"startNumber="462""#));
 
-        // Second period: 1 content seg (10s/10s) + 3 break segs = 4 segments
-        // So second period starts at 462 + 4 = 466
-        assert!(mpd.contains(r#"startNumber="466""#));
+        // Second period: 1 content seg (10s/10s), break segments don't advance
+        // So second period starts at 462 + 1 = 463
+        assert!(mpd.contains(r#"startNumber="463""#));
     }
 }
