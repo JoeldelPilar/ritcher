@@ -106,7 +106,7 @@ async fn demo_hls_playlist() {
     );
     let body = resp.text().await.unwrap();
     assert!(body.contains("#EXTM3U"));
-    assert!(body.contains("#EXT-X-CUE-OUT:30"));
+    assert!(body.contains("#EXT-X-CUE-OUT:10"));
 }
 
 #[tokio::test]
