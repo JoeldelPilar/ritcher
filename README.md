@@ -20,7 +20,8 @@ Ritcher runs as a standalone Docker container deployable anywhere. It integrates
 - **SGAI: HLS Interstitials** — Injects `EXT-X-DATERANGE` tags with `CLASS="com.apple.hls.interstitial"` per RFC 8216bis, enabling client-side ad playback via hls.js 1.6+ and AVPlayer
 - **Asset-list endpoint** — JSON endpoint returning ad creatives per ad break for HLS Interstitials players
 - **Master playlist support** — Rewrites variant-stream URLs for multi-quality stitching
-- **Demo endpoint** — Synthetic HLS playlist with real Mux test segments, CUE markers, and `EXT-X-PROGRAM-DATE-TIME` for testing
+- **Low-Latency HLS (LL-HLS)** — Pass-through support for partial segments (`EXT-X-PART`), blocking playlist reload (`_HLS_msn`/`_HLS_part`), `EXT-X-SERVER-CONTROL`, `EXT-X-PART-INF`, `EXT-X-PRELOAD-HINT`, and `EXT-X-RENDITION-REPORT`. All URIs rewritten through the stitcher proxy. Works with SGAI mode for low-latency ad insertion via HLS Interstitials
+- **Demo endpoints** — Synthetic HLS playlists with real Mux test segments, CUE markers, and `EXT-X-PROGRAM-DATE-TIME` for testing, including an LL-HLS variant with partial segments
 
 ### DASH
 - **DASH MPD parsing** — Parse and serialize DASH MPD manifests with hierarchical BaseURL resolution
@@ -111,6 +112,21 @@ VAST_ENDPOINT="http://localhost:8080/api/v1/vast?dur=[DURATION]" \
 cargo run
 ```
 
+### LL-HLS with SGAI
+
+```bash
+# Low-Latency HLS: partial segments pass through, ads via HLS Interstitials
+DEV_MODE=true \
+STITCHING_MODE=sgai \
+cargo run
+
+# LL-HLS demo (raw, no stitching):
+# http://localhost:3000/demo/ll-hls/playlist.m3u8
+
+# Stitched LL-HLS (with DATERANGE ad markers):
+# http://localhost:3000/stitch/demo/playlist.m3u8
+```
+
 ### Docker
 
 ```bash
@@ -143,6 +159,7 @@ cargo run --release
 | `GET /health` | JSON health check (`{ status, version, active_sessions, uptime_seconds }`) |
 | `GET /metrics` | Prometheus metrics in text exposition format |
 | `GET /demo/playlist.m3u8` | Demo HLS playlist with CUE markers |
+| `GET /demo/ll-hls/playlist.m3u8` | Demo LL-HLS playlist with partial segments and CUE markers |
 | `GET /demo/manifest.mpd` | Demo DASH manifest with SCTE-35 EventStream |
 | `GET /stitch/{session_id}/playlist.m3u8?origin={url}` | Stitched HLS playlist with ad insertion |
 | `GET /stitch/{session_id}/manifest.mpd?origin={url}` | Stitched DASH manifest with ad insertion |
@@ -243,7 +260,7 @@ cargo bench
 ## Testing
 
 ```bash
-# Run all tests (103 tests: 95 unit + 8 E2E)
+# Run all tests (238 tests: 219 unit + 12 E2E + 7 handler)
 cargo test
 
 # Run only unit tests
@@ -311,7 +328,7 @@ cargo clippy -- -D warnings
 
 ### Phase 4b: Advanced
 
-- [ ] Low-latency HLS (LL-HLS)
+- [x] Low-latency HLS (LL-HLS)
 - [ ] Per-viewer manifest personalization
 
 ---
