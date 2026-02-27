@@ -2,7 +2,7 @@ use crate::{
     ad::{AdProvider, interleaver},
     config::StitchingMode,
     error::Result,
-    hls::{cue, interstitial, parser},
+    hls::{cue, interstitial, ll_hls, parser},
     metrics,
     server::{state::AppState, url_validation::validate_origin_url},
 };
@@ -34,15 +34,28 @@ pub async fn serve_playlist(
         &state.config.origin_url
     };
 
-    info!("Fetching playlist from origin: {}", origin_url);
+    // Forward LL-HLS query params (_HLS_msn, _HLS_part, etc.) to origin
+    // so the origin can block until the requested MSN/part is available.
+    let fetch_url = append_ll_hls_params(origin_url, &params);
+    let is_blocking_reload = params.contains_key("_HLS_msn");
 
-    // Try manifest cache first, then fetch from origin
-    let content = if let Some(cached) = state.manifest_cache.get(origin_url) {
+    info!("Fetching playlist from origin: {}", fetch_url);
+
+    // Try manifest cache first, then fetch from origin.
+    // Bypass cache for LL-HLS blocking requests — the origin long-polls
+    // until the requested MSN/part is ready, so cached data would be stale.
+    let cached = if is_blocking_reload {
+        None
+    } else {
+        state.manifest_cache.get(origin_url)
+    };
+
+    let content = if let Some(cached) = cached {
         cached
     } else {
         let response = state
             .http_client
-            .get(origin_url)
+            .get(fetch_url.as_str())
             .send()
             .await
             .map_err(|e| {
@@ -60,8 +73,20 @@ pub async fn serve_playlist(
         }
 
         let body = response.text().await?;
-        state.manifest_cache.insert(origin_url, body.clone());
+        // Only cache non-blocking responses (LL-HLS blocking results are ephemeral)
+        if !is_blocking_reload {
+            state.manifest_cache.insert(origin_url, body.clone());
+        }
         body
+    };
+
+    // Extract LL-HLS tags before m3u8-rs parsing — the parser drops
+    // playlist-level unknown tags (SERVER-CONTROL, PART-INF, SKIP).
+    let ll_tags = if ll_hls::is_ll_hls(&content) {
+        info!("LL-HLS playlist detected — extracting tags for re-injection");
+        Some(ll_hls::extract_ll_hls_tags(&content))
+    } else {
+        None
     };
 
     // Parse HLS playlist
@@ -93,7 +118,20 @@ pub async fn serve_playlist(
     .await?;
 
     // Serialize to string
-    let playlist_str = parser::serialize_playlist(modified_playlist)?;
+    let mut playlist_str = parser::serialize_playlist(modified_playlist)?;
+
+    // LL-HLS post-processing: re-inject tags that m3u8-rs dropped during parsing,
+    // then rewrite partial segment and rendition report URIs through the stitcher.
+    if let Some(ref tags) = ll_tags {
+        playlist_str = ll_hls::inject_ll_hls_tags(&playlist_str, tags);
+        playlist_str = ll_hls::rewrite_ll_hls_uris(
+            &playlist_str,
+            &session_id,
+            &state.config.base_url,
+            origin_base,
+        );
+        info!("LL-HLS post-processing complete");
+    }
 
     metrics::record_request("playlist", 200);
     metrics::record_duration("playlist", start);
@@ -205,4 +243,26 @@ async fn process_playlist(
     // the stitcher proxy (required for session-aware segment serving)
     let playlist = Playlist::MediaPlaylist(media_playlist);
     parser::rewrite_content_urls(playlist, session_id, base_url, origin_base)
+}
+
+/// Append `_HLS_*` query parameters to an origin URL for LL-HLS blocking reload.
+///
+/// LL-HLS players send `_HLS_msn`, `_HLS_part`, `_HLS_push`, and `_HLS_skip`
+/// query parameters. The stitcher must forward these verbatim to the origin
+/// so it can block until the requested media sequence / part is ready.
+///
+/// Returns `origin_url` unchanged if no `_HLS_*` params are present.
+fn append_ll_hls_params(origin_url: &str, params: &HashMap<String, String>) -> String {
+    let ll_params: Vec<String> = params
+        .iter()
+        .filter(|(k, _)| k.starts_with("_HLS_"))
+        .map(|(k, v)| format!("{}={}", k, v))
+        .collect();
+
+    if ll_params.is_empty() {
+        return origin_url.to_string();
+    }
+
+    let sep = if origin_url.contains('?') { "&" } else { "?" };
+    format!("{}{}{}", origin_url, sep, ll_params.join("&"))
 }
