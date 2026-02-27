@@ -81,6 +81,10 @@ pub async fn build_router(config: Config) -> Router {
             "/demo/manifest.mpd",
             get(handlers::demo::serve_demo_manifest),
         )
+        .route(
+            "/demo/ll-hls/playlist.m3u8",
+            get(handlers::demo::serve_demo_ll_hls_playlist),
+        )
         // Stitcher endpoints
         .route(
             "/stitch/{session_id}/playlist.m3u8",

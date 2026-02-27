@@ -70,6 +70,11 @@ async fn start_sgai_test_server() -> SocketAddr {
     start_server(StitchingMode::Sgai, "/demo/playlist.m3u8").await
 }
 
+/// SGAI server with LL-HLS demo playlist as origin.
+async fn start_ll_hls_sgai_test_server() -> SocketAddr {
+    start_server(StitchingMode::Sgai, "/demo/ll-hls/playlist.m3u8").await
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -302,6 +307,152 @@ async fn ssai_mode_unchanged() {
     assert!(
         !body.contains("com.apple.hls.interstitial"),
         "SSAI mode must not include interstitial markers, got:\n{}",
+        body
+    );
+}
+
+// ── LL-HLS tests ────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn demo_ll_hls_playlist() {
+    let addr = start_test_server().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("http://{}/demo/ll-hls/playlist.m3u8", addr))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.headers().get("content-type").unwrap(),
+        "application/vnd.apple.mpegurl"
+    );
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("#EXTM3U"));
+    assert!(body.contains("#EXT-X-SERVER-CONTROL:"));
+    assert!(body.contains("#EXT-X-PART-INF:"));
+    assert!(body.contains("#EXT-X-PART:DURATION="));
+    assert!(body.contains("#EXT-X-PRELOAD-HINT:TYPE=PART"));
+    assert!(body.contains("#EXT-X-RENDITION-REPORT:"));
+    assert!(body.contains("#EXT-X-CUE-OUT:10"));
+}
+
+#[tokio::test]
+async fn ll_hls_sgai_preserves_playlist_tags() {
+    let addr = start_ll_hls_sgai_test_server().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("http://{}/stitch/ll-hls-test/playlist.m3u8", addr))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+
+    // LL-HLS playlist-level tags must survive the parse→serialize round-trip
+    assert!(
+        body.contains("#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES"),
+        "SERVER-CONTROL must be preserved after stitching, got:\n{}",
+        body
+    );
+    assert!(
+        body.contains("#EXT-X-PART-INF:PART-TARGET="),
+        "PART-INF must be preserved after stitching, got:\n{}",
+        body
+    );
+
+    // SGAI should inject DATERANGE interstitial markers for the CUE ad break
+    assert!(
+        body.contains("EXT-X-DATERANGE"),
+        "Expected EXT-X-DATERANGE from SGAI interstitial injection, got:\n{}",
+        body
+    );
+    assert!(
+        body.contains("com.apple.hls.interstitial"),
+        "Expected CLASS=com.apple.hls.interstitial, got:\n{}",
+        body
+    );
+}
+
+#[tokio::test]
+async fn ll_hls_sgai_rewrites_uris() {
+    let addr = start_ll_hls_sgai_test_server().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("http://{}/stitch/ll-hls-test/playlist.m3u8", addr))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+
+    // EXT-X-PART URIs should be rewritten through the stitcher segment proxy
+    assert!(
+        body.contains("/stitch/ll-hls-test/segment/"),
+        "Part/PRELOAD-HINT URIs should be rewritten to stitcher proxy, got:\n{}",
+        body
+    );
+
+    // PRELOAD-HINT must be present and rewritten
+    assert!(
+        body.contains("#EXT-X-PRELOAD-HINT:"),
+        "PRELOAD-HINT must be present, got:\n{}",
+        body
+    );
+
+    // RENDITION-REPORT URI should be rewritten to stitcher playlist endpoint
+    assert!(
+        body.contains("/stitch/ll-hls-test/playlist.m3u8?origin="),
+        "RENDITION-REPORT URI should be rewritten to stitcher playlist, got:\n{}",
+        body
+    );
+}
+
+#[tokio::test]
+async fn regular_hls_unaffected_by_ll_hls() {
+    // Regression: regular HLS (no LL-HLS tags) must work exactly as before
+    let addr = start_sgai_test_server().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!(
+            "http://{}/stitch/regression-test/playlist.m3u8",
+            addr
+        ))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+
+    // Regular HLS should NOT have any LL-HLS tags
+    assert!(
+        !body.contains("#EXT-X-SERVER-CONTROL:"),
+        "Regular HLS must not have SERVER-CONTROL, got:\n{}",
+        body
+    );
+    assert!(
+        !body.contains("#EXT-X-PART-INF:"),
+        "Regular HLS must not have PART-INF, got:\n{}",
+        body
+    );
+    assert!(
+        !body.contains("#EXT-X-PART:"),
+        "Regular HLS must not have PART tags, got:\n{}",
+        body
+    );
+
+    // But should still have SGAI markers
+    assert!(
+        body.contains("EXT-X-DATERANGE"),
+        "Regular SGAI should still have DATERANGE, got:\n{}",
         body
     );
 }
