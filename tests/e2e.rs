@@ -70,6 +70,11 @@ async fn start_sgai_test_server() -> SocketAddr {
     start_server(StitchingMode::Sgai, "/demo/playlist.m3u8").await
 }
 
+/// SGAI server with DASH demo manifest as origin.
+async fn start_dash_sgai_test_server() -> SocketAddr {
+    start_server(StitchingMode::Sgai, "/demo/manifest.mpd").await
+}
+
 /// SGAI server with LL-HLS demo playlist as origin.
 async fn start_ll_hls_sgai_test_server() -> SocketAddr {
     start_server(StitchingMode::Sgai, "/demo/ll-hls/playlist.m3u8").await
@@ -307,6 +312,91 @@ async fn ssai_mode_unchanged() {
     assert!(
         !body.contains("com.apple.hls.interstitial"),
         "SSAI mode must not include interstitial markers, got:\n{}",
+        body
+    );
+}
+
+// ── DASH SGAI tests ──────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn dash_sgai_callback_eventstream() {
+    // Full DASH SGAI pipeline: callback EventStreams instead of ad Periods
+    let addr = start_dash_sgai_test_server().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!(
+            "http://{}/stitch/dash-sgai-test/manifest.mpd",
+            addr
+        ))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+
+    // Valid MPD
+    assert!(body.contains("<MPD"), "Expected MPD root element");
+
+    // Callback EventStream should be injected
+    assert!(
+        body.contains("urn:mpeg:dash:event:callback:2015"),
+        "Expected callback scheme in SGAI mode, got:\n{}",
+        body
+    );
+
+    // Asset-list URL should be present in Event content
+    assert!(
+        body.contains("/stitch/dash-sgai-test/asset-list/"),
+        "Expected asset-list URL in callback Event, got:\n{}",
+        body
+    );
+
+    // SGAI does NOT insert ad Periods
+    assert!(
+        !body.contains("\"ad-0\""),
+        "SGAI must not insert ad Periods, got:\n{}",
+        body
+    );
+
+    // SCTE-35 EventStreams should be stripped
+    assert!(
+        !body.contains("urn:scte:scte35:"),
+        "SCTE-35 EventStreams should be stripped in SGAI mode, got:\n{}",
+        body
+    );
+}
+
+#[tokio::test]
+async fn dash_ssai_mode_unchanged() {
+    // Regression: DASH SSAI must be unaffected by SGAI additions
+    let addr = start_dash_test_server().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!(
+            "http://{}/stitch/dash-ssai-regression/manifest.mpd",
+            addr
+        ))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+
+    // SSAI should still insert ad Periods
+    assert!(
+        body.contains("ad-0"),
+        "DASH SSAI should insert ad Periods, got:\n{}",
+        body
+    );
+
+    // No callback EventStream in SSAI mode
+    assert!(
+        !body.contains("urn:mpeg:dash:event:callback:2015"),
+        "SSAI mode must not include callback EventStreams, got:\n{}",
         body
     );
 }
