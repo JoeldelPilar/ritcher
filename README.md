@@ -6,7 +6,7 @@
 
 ## Open-Source Live Ad Insertion Stitcher
 
-Ritcher is a high-performance HLS/DASH stitcher built in Rust for ad insertion. It supports both **SSAI** (Server-Side Ad Insertion) and **SGAI** (Server-Guided Ad Insertion via HLS Interstitials), sitting between the origin CDN and the player to dynamically insert ads into live and VOD streams.
+Ritcher is a high-performance HLS/DASH stitcher built in Rust for ad insertion. It supports both **SSAI** (Server-Side Ad Insertion) and **SGAI** (Server-Guided Ad Insertion via HLS Interstitials and DASH Callback EventStreams), sitting between the origin CDN and the player to dynamically insert ads into live and VOD streams.
 
 Ritcher runs as a standalone Docker container deployable anywhere. It integrates well with the [Eyevinn Open Source Cloud](https://www.osaas.io) ecosystem — particularly as a downstream stitcher for [Channel Engine](https://github.com/Eyevinn/channel-engine) — but has no platform dependencies.
 
@@ -27,7 +27,8 @@ Ritcher runs as a standalone Docker container deployable anywhere. It integrates
 - **DASH MPD parsing** — Parse and serialize DASH MPD manifests with hierarchical BaseURL resolution
 - **SCTE-35 EventStream detection** — Detects ad breaks from `urn:scte:scte35:2013:xml` EventStream elements
 - **URL rewriting** — Rewrites BaseURL and SegmentTemplate URLs at all MPD hierarchy levels through the stitcher proxy
-- **Period-based ad insertion** — Inserts ad Periods with SegmentList after detected ad break signals
+- **SSAI: Period-based ad insertion** — Inserts ad Periods with SegmentList after detected ad break signals
+- **SGAI: Callback EventStreams** — Injects `urn:mpeg:dash:event:callback:2015` EventStream per ISO 23009-1, enabling client-side ad playback via dash.js and Shaka Player. Reuses the asset-list endpoint for ad creative delivery
 - **Demo endpoint** — Synthetic DASH manifest with SCTE-35 EventStream for testing
 
 ### Shared
@@ -165,7 +166,7 @@ cargo run --release
 | `GET /stitch/{session_id}/manifest.mpd?origin={url}` | Stitched DASH manifest with ad insertion |
 | `GET /stitch/{session_id}/segment/{*path}?origin={base}` | Proxied content segment (HLS/DASH) |
 | `GET /stitch/{session_id}/ad/{ad_name}` | Proxied ad segment |
-| `GET /stitch/{session_id}/asset-list/{break_id}?dur={seconds}` | Asset-list JSON for HLS Interstitials (SGAI mode) |
+| `GET /stitch/{session_id}/asset-list/{break_id}?dur={seconds}` | Asset-list JSON for HLS Interstitials and DASH callback EventStreams (SGAI mode) |
 
 ---
 
@@ -190,7 +191,7 @@ cargo run --release
 
 **Auto-detection**: When `AD_PROVIDER_TYPE=auto` (default), Ritcher uses VAST if `VAST_ENDPOINT` is set, otherwise falls back to static.
 
-**Stitching modes**: `STITCHING_MODE=ssai` (default) replaces content segments with ad segments server-side. `STITCHING_MODE=sgai` injects HLS Interstitial markers (`EXT-X-DATERANGE`) and serves an asset-list endpoint — the player fetches and plays ads client-side. Both modes work with any ad provider (VAST or static).
+**Stitching modes**: `STITCHING_MODE=ssai` (default) replaces content segments with ad segments server-side. `STITCHING_MODE=sgai` injects HLS Interstitial markers (`EXT-X-DATERANGE`) for HLS and callback EventStreams (`urn:mpeg:dash:event:callback:2015`) for DASH, serving an asset-list endpoint — the player fetches and plays ads client-side. Both modes work with any ad provider (VAST or static).
 
 **Distributed sessions**: To share sessions across multiple Ritcher instances behind a load balancer, build with `cargo build --features valkey` and set `SESSION_STORE=valkey` with a `VALKEY_URL`.
 
@@ -210,7 +211,7 @@ Prometheus metrics available at `GET /metrics`:
 | `ritcher_slate_fallbacks_total` | Counter | Slate fallback activations |
 | `ritcher_tracking_beacons_total` | Counter | Tracking beacons by event and result |
 | `ritcher_origin_fetch_errors_total` | Counter | Origin fetch errors |
-| `ritcher_interstitials_injected_total` | Counter | HLS Interstitial DateRange tags injected (SGAI) |
+| `ritcher_interstitials_injected_total` | Counter | HLS Interstitial/DASH callback tags injected (SGAI) |
 | `ritcher_asset_list_requests_total` | Counter | Asset-list endpoint requests by status (SGAI) |
 
 ---
@@ -260,7 +261,7 @@ cargo bench
 ## Testing
 
 ```bash
-# Run all tests (238 tests: 219 unit + 12 E2E + 7 handler)
+# Run all tests (248 tests: 227 unit + 14 E2E + 7 handler)
 cargo test
 
 # Run only unit tests
@@ -329,6 +330,16 @@ cargo clippy -- -D warnings
 ### Phase 4b: Advanced
 
 - [x] Low-latency HLS (LL-HLS)
+
+### Phase 4c: SGAI — DASH Callback EventStreams
+
+- [x] Callback EventStream injection (`urn:mpeg:dash:event:callback:2015`)
+- [x] SCTE-35 EventStream stripping (no double-signaling)
+- [x] Asset-list endpoint reuse for DASH SGAI
+- [x] DASH manifest handler `StitchingMode::Sgai` branch
+
+### Next
+
 - [ ] Per-viewer manifest personalization
 
 ---
