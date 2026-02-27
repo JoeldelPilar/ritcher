@@ -83,7 +83,7 @@ pub fn detect_dash_ad_breaks(mpd: &MPD) -> Vec<DashAdBreak> {
 }
 
 /// Check if schemeIdUri represents a SCTE-35 signal
-fn is_scte35_scheme(scheme_id: &str) -> bool {
+pub(crate) fn is_scte35_scheme(scheme_id: &str) -> bool {
     scheme_id.starts_with("urn:scte:scte35:")
 }
 

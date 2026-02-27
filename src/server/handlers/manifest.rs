@@ -1,5 +1,6 @@
 use crate::{
-    dash::{cue, interleaver, parser},
+    config::StitchingMode,
+    dash::{cue, interleaver, parser, sgai},
     error::Result,
     metrics,
     server::{state::AppState, url_validation::validate_origin_url},
@@ -77,24 +78,39 @@ pub async fn serve_manifest(
         info!("Detected {} ad break(s)", ad_breaks.len());
         metrics::record_ad_breaks(ad_breaks.len());
 
-        // Step 2: Get ad segments for each break
-        let mut ad_segments_per_break = Vec::with_capacity(ad_breaks.len());
-        for ad_break in &ad_breaks {
-            let segs = state
-                .ad_provider
-                .get_ad_segments(ad_break.duration as f32, &session_id)
-                .await;
-            ad_segments_per_break.push(segs);
-        }
+        match state.config.stitching_mode {
+            StitchingMode::Ssai => {
+                // Step 2: Get ad segments for each break
+                let mut ad_segments_per_break = Vec::with_capacity(ad_breaks.len());
+                for ad_break in &ad_breaks {
+                    let segs = state
+                        .ad_provider
+                        .get_ad_segments(ad_break.duration as f32, &session_id)
+                        .await;
+                    ad_segments_per_break.push(segs);
+                }
 
-        // Step 3: Interleave ad Periods into MPD
-        mpd = interleaver::interleave_ads_mpd(
-            mpd,
-            &ad_breaks,
-            &ad_segments_per_break,
-            &session_id,
-            &state.config.base_url,
-        );
+                // Step 3: Interleave ad Periods into MPD
+                mpd = interleaver::interleave_ads_mpd(
+                    mpd,
+                    &ad_breaks,
+                    &ad_segments_per_break,
+                    &session_id,
+                    &state.config.base_url,
+                );
+            }
+            StitchingMode::Sgai => {
+                // SGAI: inject callback EventStreams instead of ad Periods
+                sgai::inject_dash_callbacks(
+                    &mut mpd,
+                    &ad_breaks,
+                    &session_id,
+                    &state.config.base_url,
+                );
+                sgai::strip_scte35_event_streams(&mut mpd);
+                metrics::record_interstitials(ad_breaks.len());
+            }
+        }
     } else {
         info!("No ad breaks detected in MPD");
     }
