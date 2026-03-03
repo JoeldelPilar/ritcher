@@ -56,6 +56,9 @@ pub fn inject_dash_callbacks(
             continue;
         };
 
+        // Ad break durations and presentation times are non-negative f64 values
+        // representing seconds; truncation to u64 is intentional for DASH timescale=1.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let events: Vec<Event> = breaks
             .iter()
             .map(|(break_idx, ad_break)| {

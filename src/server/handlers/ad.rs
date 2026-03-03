@@ -3,7 +3,7 @@ use crate::{
     error::Result,
     http_retry::{RetryConfig, fetch_with_retry},
     metrics,
-    server::state::AppState,
+    server::{state::AppState, url_validation::validate_session_id},
 };
 use axum::{
     body::Body,
@@ -14,17 +14,19 @@ use axum::{
 use std::time::Instant;
 use tracing::info;
 
-/// Serve ad segments by proxying from the configured ad source
+/// Serve ad segments by proxying from the configured ad source.
 ///
-/// The ad_name encodes the break and segment index (e.g. "break-0-seg-3.ts").
-/// We delegate URL resolution to the AdProvider, keeping this handler decoupled
-/// from ad source implementation details.
+/// The `ad_name` path parameter encodes the break and segment index
+/// (e.g. `break-0-seg-3.ts`). URL resolution is delegated to the
+/// `AdProvider` trait, keeping this handler decoupled from ad source details.
+/// Fires VAST tracking beacons (impressions, quartiles) as a side effect.
 ///
 /// Uses [`fetch_with_retry`] for fault-tolerant HTTP fetching.
 pub async fn serve_ad(
     Path((session_id, ad_name)): Path<(String, String)>,
     State(state): State<AppState>,
 ) -> Result<Response> {
+    validate_session_id(&session_id)?;
     let start = Instant::now();
     info!("Serving ad: {} for session: {}", ad_name, session_id);
 

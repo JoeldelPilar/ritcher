@@ -1,59 +1,61 @@
-use crate::ad::conditioning;
+mod cache;
+mod fetch;
+
 use crate::ad::provider::{AdCreative, AdProvider, AdSegment, AdTrackingInfo, ResolvedSegment};
 use crate::ad::slate::SlateProvider;
-use crate::ad::vast::{self, TrackingEvent, VastAdType, Verification};
-use crate::http_retry::{RetryConfig, fetch_with_retry};
+use crate::ad::vast::{TrackingEvent, Verification};
 use crate::metrics;
 use async_trait::async_trait;
+use cache::MAX_CACHE_SIZE;
 use dashmap::DashMap;
 use reqwest::Client;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 /// Ad creative resolved from VAST (before caching)
 #[derive(Debug, Clone)]
-struct ResolvedVastCreative {
+pub(crate) struct ResolvedVastCreative {
     /// URL to the ad creative (HLS playlist or MP4)
-    url: String,
+    pub(crate) url: String,
     /// Duration in seconds
-    duration: f32,
+    pub(crate) duration: f32,
     /// Whether this is an HLS stream (vs progressive MP4)
-    is_hls: bool,
+    pub(crate) is_hls: bool,
     /// Impression URLs to fire
-    impression_urls: Vec<String>,
+    pub(crate) impression_urls: Vec<String>,
     /// Tracking events
-    tracking_events: Vec<TrackingEvent>,
+    pub(crate) tracking_events: Vec<TrackingEvent>,
     /// Error URL
-    error_url: Option<String>,
+    pub(crate) error_url: Option<String>,
     /// OMID verification resources accumulated from wrapper chain + InLine
-    verifications: Vec<Verification>,
+    pub(crate) verifications: Vec<Verification>,
 }
 
 /// Ad creative cached per session with tracking state
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
-struct ResolvedCreative {
+pub(crate) struct ResolvedCreative {
     /// URL to the ad creative (HLS playlist or MP4)
-    url: String,
+    pub(crate) url: String,
     /// Duration in seconds
-    duration: f32,
+    pub(crate) duration: f32,
     /// Whether this is an HLS stream (vs progressive MP4)
-    is_hls: bool,
+    pub(crate) is_hls: bool,
     /// Impression URLs to fire
-    impression_urls: Vec<String>,
+    pub(crate) impression_urls: Vec<String>,
     /// Tracking events
-    tracking_events: Vec<TrackingEvent>,
+    pub(crate) tracking_events: Vec<TrackingEvent>,
     /// Error URL
-    error_url: Option<String>,
+    pub(crate) error_url: Option<String>,
     /// Total segments in this ad
-    total_segments: usize,
+    pub(crate) total_segments: usize,
     /// Index of this segment
-    segment_index: usize,
+    pub(crate) segment_index: usize,
     /// Whether tracking has been returned for this segment (deduplication)
-    visited: bool,
+    pub(crate) visited: bool,
     /// When this entry was inserted (for TTL-based eviction)
-    inserted_at: Instant,
+    pub(crate) inserted_at: Instant,
 }
 
 /// VAST-based ad provider that fetches ads from a VAST endpoint
@@ -67,24 +69,24 @@ pub struct VastAdProvider {
     /// VAST endpoint URL (with optional macros like [DURATION])
     vast_endpoint: String,
     /// HTTP client for VAST requests
-    http_client: Client,
+    pub(crate) http_client: Client,
     /// Per-session ad cache: maps "session_id:break-N-seg-M" to creative URL
-    ad_cache: Arc<DashMap<String, ResolvedCreative>>,
+    pub(crate) ad_cache: Arc<DashMap<String, ResolvedCreative>>,
     /// Per-session break counter: tracks next break index for each session
-    break_counter: Arc<DashMap<String, u32>>,
+    pub(crate) break_counter: Arc<DashMap<String, u32>>,
     /// Maximum number of VAST wrapper redirects to follow
-    max_wrapper_depth: u32,
+    pub(crate) max_wrapper_depth: u32,
     /// VAST request timeout
-    timeout: Duration,
+    pub(crate) timeout: Duration,
     /// Optional slate provider for fallback when VAST returns no ads
-    slate: Option<SlateProvider>,
+    pub(crate) slate: Option<SlateProvider>,
 }
 
 impl VastAdProvider {
     /// Create a new VastAdProvider
     ///
     /// # Arguments
-    /// * `vast_endpoint` - VAST endpoint URL (supports [DURATION] and [CACHEBUSTING] macros)
+    /// * `vast_endpoint` - VAST endpoint URL (supports `[DURATION]` and `[CACHEBUSTING]` macros)
     /// * `http_client` - Shared HTTP client for VAST requests
     pub fn new(vast_endpoint: String, http_client: Client) -> Self {
         Self {
@@ -108,137 +110,19 @@ impl VastAdProvider {
     }
 
     /// Replace VAST macros in the endpoint URL
-    fn resolve_endpoint(&self, duration: f32) -> String {
+    pub(crate) fn resolve_endpoint(&self, duration: f32) -> String {
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis();
 
+        // VAST macro: duration is always a positive f32 representing seconds;
+        // truncation to u32 is intentional (ad servers expect integer seconds).
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let dur_secs = duration as u32;
         self.vast_endpoint
-            .replace("[DURATION]", &format!("{}", duration as u32))
+            .replace("[DURATION]", &format!("{}", dur_secs))
             .replace("[CACHEBUSTING]", &format!("{}", timestamp))
-    }
-
-    /// Fetch and parse VAST XML, following wrapper chains
-    ///
-    /// Accumulates wrapper tracking data and verification nodes through the chain.
-    /// Uses [`fetch_with_retry`] for fault-tolerant HTTP fetching.
-    ///
-    /// Parameters use owned types (`String`, `Vec<T>`) instead of references
-    /// because recursive async functions cannot hold borrows across `.await`
-    /// points without self-referential lifetimes.
-    async fn fetch_vast(
-        &self,
-        url: String,
-        depth: u32,
-        session_id: String,
-        wrapper_impressions: Vec<String>,
-        wrapper_tracking: Vec<TrackingEvent>,
-        wrapper_verifications: Vec<Verification>,
-    ) -> Option<Vec<ResolvedVastCreative>> {
-        if depth > self.max_wrapper_depth {
-            warn!(
-                "VAST wrapper chain exceeded max depth ({})",
-                self.max_wrapper_depth
-            );
-            return None;
-        }
-
-        let retry_cfg = RetryConfig {
-            timeout: Some(self.timeout),
-            ..Default::default()
-        };
-        let xml = match fetch_with_retry(&self.http_client, &url, &retry_cfg).await {
-            Ok(resp) => match resp.text().await {
-                Ok(text) => text,
-                Err(e) => {
-                    error!("Failed to read VAST response body: {}", e);
-                    return None;
-                }
-            },
-            Err(e) => {
-                error!("VAST request failed after retries: {}", e);
-                return None;
-            }
-        };
-
-        let vast_response = match vast::parse_vast(&xml) {
-            Ok(r) => r,
-            Err(e) => {
-                error!("Failed to parse VAST XML: {}", e);
-                return None;
-            }
-        };
-
-        let mut creatives = Vec::new();
-
-        for ad in &vast_response.ads {
-            match &ad.ad_type {
-                VastAdType::InLine(inline) => {
-                    for creative in &inline.creatives {
-                        if let Some(linear) = &creative.linear
-                            && let Some(media_file) =
-                                vast::select_best_media_file(&linear.media_files)
-                        {
-                            // Ad conditioning: check creative compatibility (warnings only)
-                            conditioning::check_creative(media_file, &session_id);
-
-                            let is_hls = media_file.mime_type == "application/x-mpegURL";
-
-                            // Merge wrapper tracking with inline tracking
-                            let mut impression_urls = wrapper_impressions.clone();
-                            impression_urls.extend(inline.impression_urls.clone());
-
-                            let mut tracking_events = wrapper_tracking.clone();
-                            tracking_events.extend(linear.tracking_events.clone());
-
-                            // Merge wrapper verifications with inline verifications
-                            // IAB spec: all Verification nodes from all wrapper levels must survive
-                            let mut verifications = wrapper_verifications.clone();
-                            verifications.extend(inline.verifications.clone());
-
-                            creatives.push(ResolvedVastCreative {
-                                url: media_file.url.clone(),
-                                duration: linear.duration,
-                                is_hls,
-                                impression_urls,
-                                tracking_events,
-                                error_url: inline.error_url.clone(),
-                                verifications,
-                            });
-                        }
-                    }
-                }
-                VastAdType::Wrapper(wrapper) => {
-                    // Accumulate wrapper tracking, verifications and follow chain
-                    let mut merged_impressions = wrapper_impressions.clone();
-                    merged_impressions.extend(wrapper.impression_urls.clone());
-
-                    let mut merged_tracking = wrapper_tracking.clone();
-                    merged_tracking.extend(wrapper.tracking_events.clone());
-
-                    let mut merged_verifications = wrapper_verifications.clone();
-                    merged_verifications.extend(wrapper.verifications.clone());
-
-                    // Box::pin is required for recursive async functions to avoid
-                    // infinite future size at compile time
-                    if let Some(mut wrapped_creatives) = Box::pin(self.fetch_vast(
-                        wrapper.ad_tag_uri.clone(),
-                        depth + 1,
-                        session_id.clone(),
-                        merged_impressions,
-                        merged_tracking,
-                        merged_verifications,
-                    ))
-                    .await
-                    {
-                        creatives.append(&mut wrapped_creatives);
-                    }
-                }
-            }
-        }
-
-        Some(creatives)
     }
 
     /// Generate slate fallback segments when VAST returns no ads
@@ -301,7 +185,7 @@ impl AdProvider for VastAdProvider {
                 metrics::record_vast_request("empty");
                 if let Some(slate) = &self.slate {
                     warn!(
-                        "VastAdProvider: Empty VAST response for session {} — falling back to slate",
+                        "VastAdProvider: Empty VAST response for session {} \u{2014} falling back to slate",
                         session_id
                     );
                     metrics::record_slate_fallback();
@@ -318,7 +202,7 @@ impl AdProvider for VastAdProvider {
                 metrics::record_vast_request("error");
                 if let Some(slate) = &self.slate {
                     warn!(
-                        "VastAdProvider: VAST failed for session {} — falling back to slate",
+                        "VastAdProvider: VAST failed for session {} \u{2014} falling back to slate",
                         session_id
                     );
                     metrics::record_slate_fallback();
@@ -348,22 +232,30 @@ impl AdProvider for VastAdProvider {
         for (seg_idx, creative) in creatives.iter().enumerate() {
             let ad_name = format!("break-{}-seg-{}.ts", break_idx, seg_idx);
 
-            // Cache the resolved creative with tracking metadata
-            self.ad_cache.insert(
-                Self::cache_key(session_id, &ad_name),
-                ResolvedCreative {
-                    url: creative.url.clone(),
-                    duration: creative.duration,
-                    is_hls: creative.is_hls,
-                    impression_urls: creative.impression_urls.clone(),
-                    tracking_events: creative.tracking_events.clone(),
-                    error_url: creative.error_url.clone(),
-                    total_segments,
-                    segment_index: seg_idx,
-                    visited: false,
-                    inserted_at: Instant::now(),
-                },
-            );
+            // Cache the resolved creative with tracking metadata.
+            // Guard against unbounded growth between cleanup cycles.
+            if self.ad_cache.len() >= MAX_CACHE_SIZE {
+                warn!(
+                    "Ad cache at capacity ({} entries) \u{2014} skipping insert for {}",
+                    MAX_CACHE_SIZE, ad_name
+                );
+            } else {
+                self.ad_cache.insert(
+                    Self::cache_key(session_id, &ad_name),
+                    ResolvedCreative {
+                        url: creative.url.clone(),
+                        duration: creative.duration,
+                        is_hls: creative.is_hls,
+                        impression_urls: creative.impression_urls.clone(),
+                        tracking_events: creative.tracking_events.clone(),
+                        error_url: creative.error_url.clone(),
+                        total_segments,
+                        segment_index: seg_idx,
+                        visited: false,
+                        inserted_at: Instant::now(),
+                    },
+                );
+            }
 
             segments.push(AdSegment {
                 uri: ad_name,
@@ -449,50 +341,7 @@ impl AdProvider for VastAdProvider {
     }
 
     fn cleanup_cache(&self) {
-        const MAX_AGE: Duration = Duration::from_secs(300);
-        const MAX_SIZE: usize = 10_000;
-
-        let before = self.ad_cache.len();
-
-        // Pass 1: evict entries older than MAX_AGE
-        self.ad_cache
-            .retain(|_, v| v.inserted_at.elapsed() < MAX_AGE);
-
-        // Pass 2: if still over MAX_SIZE, evict the oldest entries first.
-        // Snapshot into a Vec to avoid TOCTOU issues with concurrent inserts.
-        if self.ad_cache.len() > MAX_SIZE {
-            let mut entries: Vec<(String, Duration)> = self
-                .ad_cache
-                .iter()
-                .map(|e| (e.key().clone(), e.value().inserted_at.elapsed()))
-                .collect();
-
-            // Sort descending by age (oldest first)
-            entries.sort_unstable_by(|a, b| b.1.cmp(&a.1));
-
-            let to_remove = entries.len().saturating_sub(MAX_SIZE);
-            for (key, _) in entries.iter().take(to_remove) {
-                self.ad_cache.remove(key);
-            }
-        }
-
-        let after = self.ad_cache.len();
-        if before != after {
-            info!(
-                "VastAdProvider: evicted {} stale cache entries ({} remaining)",
-                before - after,
-                after
-            );
-        }
-
-        // Clean up break counters for sessions with no remaining cache entries
-        let active_sessions: std::collections::HashSet<String> = self
-            .ad_cache
-            .iter()
-            .filter_map(|e| e.key().split(':').next().map(String::from))
-            .collect();
-        self.break_counter
-            .retain(|session_id, _| active_sessions.contains(session_id));
+        self.run_cleanup_cache();
     }
 
     fn resolve_segment_with_tracking(
@@ -627,7 +476,7 @@ mod tests {
             },
         );
 
-        // First access — tracking should be returned
+        // First access -- tracking should be returned
         let result1 = provider.resolve_segment_with_tracking("break-0-seg-0.ts", "session-x");
         assert!(result1.is_some());
         assert!(
@@ -635,120 +484,13 @@ mod tests {
             "First access should return tracking"
         );
 
-        // Second access — tracking suppressed (dedup via visited flag)
+        // Second access -- tracking suppressed (dedup via visited flag)
         let result2 = provider.resolve_segment_with_tracking("break-0-seg-0.ts", "session-x");
         assert!(result2.is_some());
         assert!(
             result2.unwrap().tracking.is_none(),
             "Second access should not return tracking (dedup)"
         );
-    }
-
-    #[test]
-    fn cleanup_cache_evicts_old_entries() {
-        let client = Client::new();
-        let provider = VastAdProvider::new("http://ads.example.com/vast".to_string(), client);
-
-        // Old entry: inserted 400 s ago — exceeds the 300 s MAX_AGE constant
-        provider.ad_cache.insert(
-            "session-old:break-0-seg-0.ts".to_string(),
-            ResolvedCreative {
-                url: "http://cdn.example.com/old.m3u8".to_string(),
-                duration: 15.0,
-                is_hls: true,
-                impression_urls: vec![],
-                tracking_events: vec![],
-                error_url: None,
-                total_segments: 1,
-                segment_index: 0,
-                visited: false,
-                inserted_at: Instant::now() - Duration::from_secs(400),
-            },
-        );
-
-        // Fresh entry: just inserted
-        provider.ad_cache.insert(
-            "session-new:break-0-seg-0.ts".to_string(),
-            ResolvedCreative {
-                url: "http://cdn.example.com/new.m3u8".to_string(),
-                duration: 15.0,
-                is_hls: true,
-                impression_urls: vec![],
-                tracking_events: vec![],
-                error_url: None,
-                total_segments: 1,
-                segment_index: 0,
-                visited: false,
-                inserted_at: Instant::now(),
-            },
-        );
-
-        assert_eq!(provider.ad_cache.len(), 2);
-        provider.cleanup_cache();
-        assert_eq!(provider.ad_cache.len(), 1, "Old entry should be evicted");
-        assert!(
-            provider
-                .ad_cache
-                .contains_key("session-new:break-0-seg-0.ts"),
-            "Fresh entry should remain after cleanup"
-        );
-    }
-
-    #[test]
-    fn cleanup_cache_also_removes_stale_break_counters() {
-        let client = Client::new();
-        let provider = VastAdProvider::new("http://ads.example.com/vast".to_string(), client);
-
-        // Simulate a session with a break counter but expired cache entries
-        provider
-            .break_counter
-            .insert("expired-session".to_string(), 3);
-        provider.ad_cache.insert(
-            "expired-session:break-0-seg-0.ts".to_string(),
-            ResolvedCreative {
-                url: "http://cdn.example.com/old.m3u8".to_string(),
-                duration: 15.0,
-                is_hls: true,
-                impression_urls: vec![],
-                tracking_events: vec![],
-                error_url: None,
-                total_segments: 1,
-                segment_index: 0,
-                visited: false,
-                inserted_at: Instant::now() - Duration::from_secs(400),
-            },
-        );
-
-        // Active session with fresh cache
-        provider
-            .break_counter
-            .insert("active-session".to_string(), 1);
-        provider.ad_cache.insert(
-            "active-session:break-0-seg-0.ts".to_string(),
-            ResolvedCreative {
-                url: "http://cdn.example.com/new.m3u8".to_string(),
-                duration: 15.0,
-                is_hls: true,
-                impression_urls: vec![],
-                tracking_events: vec![],
-                error_url: None,
-                total_segments: 1,
-                segment_index: 0,
-                visited: false,
-                inserted_at: Instant::now(),
-            },
-        );
-
-        assert_eq!(provider.break_counter.len(), 2);
-        provider.cleanup_cache();
-
-        assert_eq!(
-            provider.break_counter.len(),
-            1,
-            "Expired session's break counter should be cleaned up"
-        );
-        assert!(provider.break_counter.contains_key("active-session"));
-        assert!(!provider.break_counter.contains_key("expired-session"));
     }
 
     #[test]
@@ -864,7 +606,7 @@ mod tests {
         let segments1 = provider.get_ad_segments(30.0, "session-multi").await;
         assert_eq!(segments1[0].uri, "break-0-seg-0.ts");
 
-        // Second ad break for same session — should get break-1, not break-0
+        // Second ad break for same session -- should get break-1, not break-0
         let segments2 = provider.get_ad_segments(30.0, "session-multi").await;
         assert_eq!(
             segments2[0].uri, "break-1-seg-0.ts",
@@ -889,124 +631,6 @@ mod tests {
             segments3[0].uri, "break-0-seg-0.ts",
             "Different session should start at break-0"
         );
-    }
-
-    #[test]
-    fn test_wrapper_tracking_merge() {
-        // Verifies that wrapper impression URLs and tracking events
-        // are correctly accumulated and merged with inline ad data.
-        // This tests the merge pattern used in fetch_vast().
-
-        // Simulate wrapper accumulation
-        let mut wrapper_impressions = vec!["http://wrapper/imp".to_string()];
-        let inline_impressions = vec!["http://inline/imp".to_string()];
-        wrapper_impressions.extend(inline_impressions);
-
-        assert_eq!(wrapper_impressions.len(), 2);
-        assert_eq!(wrapper_impressions[0], "http://wrapper/imp");
-        assert_eq!(wrapper_impressions[1], "http://inline/imp");
-
-        // Simulate tracking event accumulation
-        let mut wrapper_tracking = vec![TrackingEvent {
-            event: "start".into(),
-            url: "http://wrapper/start".into(),
-        }];
-        let inline_tracking = vec![TrackingEvent {
-            event: "complete".into(),
-            url: "http://inline/complete".into(),
-        }];
-        wrapper_tracking.extend(inline_tracking);
-
-        assert_eq!(wrapper_tracking.len(), 2);
-        assert_eq!(wrapper_tracking[0].url, "http://wrapper/start");
-        assert_eq!(wrapper_tracking[1].url, "http://inline/complete");
-
-        // Multi-level: second wrapper adds more impressions
-        let mut level2_impressions = vec!["http://wrapper2/imp".to_string()];
-        level2_impressions.extend(wrapper_impressions);
-        assert_eq!(level2_impressions.len(), 3);
-        assert_eq!(level2_impressions[0], "http://wrapper2/imp");
-        assert_eq!(level2_impressions[1], "http://wrapper/imp");
-        assert_eq!(level2_impressions[2], "http://inline/imp");
-    }
-
-    #[test]
-    fn test_wrapper_verification_accumulation() {
-        use crate::ad::vast::Verification;
-
-        // Simulate wrapper chain verification accumulation (same pattern as fetch_vast)
-        // Level 1 wrapper has one verification
-        let wrapper_verifications = vec![Verification {
-            vendor: Some("wrapper-vendor".to_string()),
-            javascript_resource_url: Some("https://wrapper.example.com/omid.js".to_string()),
-            api_framework: Some("omid".to_string()),
-            parameters: None,
-            tracking_events: vec![],
-        }];
-
-        // InLine ad has its own verification
-        let inline_verifications = vec![Verification {
-            vendor: Some("inline-vendor".to_string()),
-            javascript_resource_url: Some("https://inline.example.com/omid.js".to_string()),
-            api_framework: Some("omid".to_string()),
-            parameters: Some("ctx=abc".to_string()),
-            tracking_events: vec![],
-        }];
-
-        // Merge: wrapper first, then inline (IAB spec: all must survive)
-        let mut merged = wrapper_verifications;
-        merged.extend(inline_verifications);
-
-        assert_eq!(merged.len(), 2);
-        assert_eq!(merged[0].vendor.as_deref(), Some("wrapper-vendor"));
-        assert_eq!(merged[1].vendor.as_deref(), Some("inline-vendor"));
-        assert_eq!(merged[1].parameters.as_deref(), Some("ctx=abc"));
-    }
-
-    #[test]
-    fn test_multi_level_wrapper_verification_accumulation() {
-        use crate::ad::vast::Verification;
-
-        // Level 2 wrapper
-        let level2 = vec![Verification {
-            vendor: Some("level2-vendor".to_string()),
-            javascript_resource_url: Some("https://l2.example.com/omid.js".to_string()),
-            api_framework: Some("omid".to_string()),
-            parameters: None,
-            tracking_events: vec![],
-        }];
-
-        // Level 1 wrapper adds its own
-        let level1 = vec![Verification {
-            vendor: Some("level1-vendor".to_string()),
-            javascript_resource_url: Some("https://l1.example.com/omid.js".to_string()),
-            api_framework: Some("omid".to_string()),
-            parameters: None,
-            tracking_events: vec![],
-        }];
-
-        // InLine adds its own
-        let inline = vec![Verification {
-            vendor: Some("inline-vendor".to_string()),
-            javascript_resource_url: Some("https://inline.example.com/omid.js".to_string()),
-            api_framework: Some("omid".to_string()),
-            parameters: None,
-            tracking_events: vec![],
-        }];
-
-        // Simulate the accumulation through wrapper chain
-        let mut acc = level2;
-        acc.extend(level1);
-        acc.extend(inline);
-
-        assert_eq!(
-            acc.len(),
-            3,
-            "All verification nodes from all levels must survive"
-        );
-        assert_eq!(acc[0].vendor.as_deref(), Some("level2-vendor"));
-        assert_eq!(acc[1].vendor.as_deref(), Some("level1-vendor"));
-        assert_eq!(acc[2].vendor.as_deref(), Some("inline-vendor"));
     }
 
     #[tokio::test]

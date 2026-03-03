@@ -31,6 +31,8 @@ metrics-exporter-prometheus = "0.16"
 chrono = "0.4"
 redis = { version = "0.29", features = ["tokio-comp", "connection-manager"], optional = true }
 hickory-resolver = "0.25"
+futures-util = "0.3"
+tokio-util = { version = "0.7", features = ["rt"] }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
@@ -38,6 +40,10 @@ tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 wiremock = "0.6"
 m3u8-rs = "6.0"
+
+[lints.clippy]
+print_stdout = "deny"
+print_stderr = "deny"
 
 [[bench]]
 name = "manifest_pipeline"

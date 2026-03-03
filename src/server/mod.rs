@@ -4,18 +4,26 @@ pub mod rate_limit;
 pub mod state;
 pub mod url_validation;
 
+/// Maximum allowed manifest/MPD response body size (10 MB).
+///
+/// Prevents OOM from a malicious origin streaming unbounded data via chunked
+/// transfer encoding. Used by both HLS playlist and DASH manifest handlers.
+pub(crate) const MAX_MANIFEST_SIZE: u64 = 10 * 1024 * 1024;
+
 use crate::config::Config;
 use axum::{
     Router,
     extract::Request,
-    http::header::HeaderValue,
+    http::{Method, header, header::HeaderValue},
     middleware::{self, Next},
     response::Response,
     routing::get,
 };
 use metrics_exporter_prometheus::PrometheusBuilder;
 use state::AppState;
-use tower_http::cors::CorsLayer;
+use std::time::Duration;
+use tokio_util::sync::CancellationToken;
+use tower_http::cors::{Any, CorsLayer};
 use tracing::{error, info};
 
 /// Version header value — resolved at compile time from Cargo.toml.
@@ -34,41 +42,87 @@ async fn version_header(req: Request, next: Next) -> Response {
 /// Extracted for testability — E2E tests use this to start a server
 /// without the Prometheus recorder and startup logging.
 pub async fn build_router(config: Config) -> Router {
+    build_router_with_token(config, CancellationToken::new()).await
+}
+
+/// Build the Axum router with a cancellation token for coordinated shutdown.
+///
+/// Background tasks (session cleanup, ad cache eviction, rate limiter cleanup)
+/// will stop gracefully when the token is cancelled, instead of being abruptly
+/// killed when the tokio runtime drops.
+pub async fn build_router_with_token(config: Config, cancel: CancellationToken) -> Router {
     let state = AppState::new(config).await;
 
     // Spawn background task for session cleanup (prevents memory leaks)
     let cleanup_sessions = state.sessions.clone();
+    let cancel_sessions = cancel.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
         loop {
-            interval.tick().await;
-            cleanup_sessions.cleanup_expired().await;
+            tokio::select! {
+                _ = interval.tick() => {
+                    cleanup_sessions.cleanup_expired().await;
+                }
+                _ = cancel_sessions.cancelled() => {
+                    info!("Session cleanup task shutting down");
+                    break;
+                }
+            }
         }
     });
 
     // Spawn background task for ad cache eviction (TTL + size bound)
     let cleanup_ad_provider = state.ad_provider.clone();
+    let cancel_ad = cancel.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
         loop {
-            interval.tick().await;
-            cleanup_ad_provider.cleanup_cache();
+            tokio::select! {
+                _ = interval.tick() => {
+                    cleanup_ad_provider.cleanup_cache();
+                }
+                _ = cancel_ad.cancelled() => {
+                    info!("Ad cache cleanup task shutting down");
+                    break;
+                }
+            }
         }
     });
 
     // Spawn background task for rate limiter cleanup (prevents stale IP entries)
     if let Some(ref limiter) = state.rate_limiter {
         let cleanup_limiter = limiter.clone();
+        let cancel_rate = cancel.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
             loop {
-                interval.tick().await;
-                cleanup_limiter.cleanup();
+                tokio::select! {
+                    _ = interval.tick() => {
+                        cleanup_limiter.cleanup();
+                    }
+                    _ = cancel_rate.cancelled() => {
+                        info!("Rate limiter cleanup task shutting down");
+                        break;
+                    }
+                }
             }
         });
     }
 
-    let cors = CorsLayer::very_permissive();
+    // Explicit CORS policy: only allow methods that HLS/DASH players need.
+    // All origins (`Any`) are permitted because video players embed from
+    // arbitrary domains. RANGE header is required for byte-range segment
+    // requests. max_age avoids repeated preflight requests.
+    let cors = CorsLayer::new()
+        .allow_methods([Method::GET, Method::HEAD, Method::OPTIONS])
+        .allow_origin(Any)
+        .allow_headers([
+            header::CONTENT_TYPE,
+            header::ACCEPT,
+            header::ORIGIN,
+            header::RANGE,
+        ])
+        .max_age(Duration::from_secs(3600));
 
     Router::new()
         .route("/", get(handlers::health::health_check))
@@ -127,8 +181,13 @@ pub async fn start(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         .expect("Failed to install Prometheus recorder");
     info!("Prometheus metrics recorder installed");
 
-    // Build the application router
-    let app = build_router(config)
+    // Create a cancellation token shared between background tasks and the
+    // shutdown handler. When a shutdown signal arrives, the token is cancelled
+    // first so background tasks stop cleanly before the HTTP server shuts down.
+    let cancel = CancellationToken::new();
+
+    // Build the application router with the shared cancellation token
+    let app = build_router_with_token(config, cancel.clone())
         .await
         // Prometheus metrics endpoint (only in production start, not in E2E tests)
         .route(
@@ -161,9 +220,16 @@ pub async fn start(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         base_url, base_url
     );
 
-    // Start serving with graceful shutdown
+    // Start serving with graceful shutdown.
+    // The shutdown future cancels background tasks first, then signals the
+    // HTTP server to stop accepting new connections and drain in-flight ones.
+    let shutdown_cancel = cancel.clone();
     if let Err(e) = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            info!("Cancelling background tasks...");
+            shutdown_cancel.cancel();
+        })
         .await
     {
         error!("Server error: {}", e);

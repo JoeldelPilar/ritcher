@@ -39,6 +39,9 @@ impl SlateProvider {
     /// Used directly by VastAdProvider when VAST returns empty or fails.
     /// Cycles through available slate segments to fill the requested duration.
     pub fn fill_duration(&self, duration: f32, session_id: &str) -> Vec<AdSegment> {
+        // Duration and segment_duration are positive f32; ceil() is non-negative
+        // and well within usize range for realistic durations.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let num_segments = (duration / self.segment_duration).ceil() as usize;
         let num_segments = num_segments.max(1);
 

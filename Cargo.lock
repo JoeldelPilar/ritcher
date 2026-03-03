@@ -2020,6 +2020,7 @@ dependencies = [
  "criterion",
  "dash-mpd",
  "dashmap",
+ "futures-util",
  "hickory-resolver",
  "http-body-util",
  "m3u8-rs",
@@ -2032,6 +2033,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tower",
  "tower-http",
  "tracing",
@@ -2639,6 +2641,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]

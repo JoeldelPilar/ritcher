@@ -64,7 +64,7 @@ impl AppState {
 
         let builder = Client::builder()
             .redirect(ssrf_safe_redirect)
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(config.origin_timeout_secs))
             .connect_timeout(Duration::from_secs(5))
             .pool_idle_timeout(Duration::from_secs(90))
             .pool_max_idle_per_host(10);
@@ -163,12 +163,15 @@ impl AppState {
             None
         };
 
+        let manifest_cache =
+            ManifestCache::with_ttl(Duration::from_millis(config.manifest_cache_ttl_ms));
+
         Self {
             config: Arc::new(config),
             http_client,
             sessions,
             ad_provider,
-            manifest_cache: ManifestCache::new(),
+            manifest_cache,
             rate_limiter,
             started_at: Instant::now(),
         }
