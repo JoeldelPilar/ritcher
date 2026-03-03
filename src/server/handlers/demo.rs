@@ -7,25 +7,36 @@ use serde::Deserialize;
 use std::fmt::Write;
 use tracing::info;
 
-/// Base URL for Mux Big Buck Bunny test stream segments
+/// Base URL for Mux Big Buck Bunny test stream segments (HLS, MPEG-TS)
 const MUX_BASE: &str = "https://test-streams.mux.dev/x36xhzz/url_0";
 /// Mux segment filename
 const MUX_SEGMENT: &str = "193039199_mp4_h264_aac_hd_7.ts";
 /// First Mux segment index
 const MUX_START_INDEX: u32 = 462;
-/// Duration of each segment in seconds
+/// Duration of each HLS segment in seconds
 const SEGMENT_DURATION: f32 = 10.0;
 /// Duration of each ad break in seconds (matches DemoAdProvider: 10 × 1s segments)
 const BREAK_DURATION: u32 = 10;
 /// Number of placeholder content segments per ad break (10s / 10s = 1)
 const BREAK_SEGMENTS: u32 = 1;
 
+/// Base URL for DASH-IF Big Buck Bunny fMP4 segments (DASH, ISO BMFF)
+const DASH_BASE: &str = "https://dash.akamaized.net/akamai/bbb_30fps";
+/// DASH video representation ID (640×360 @ 800 kbps)
+const DASH_VIDEO_REP: &str = "bbb_30fps_640x360_800k";
+/// DASH audio representation ID (AAC @ 64 kbps)
+const DASH_AUDIO_REP: &str = "bbb_a64k";
+/// Duration of each DASH segment in seconds
+const DASH_SEGMENT_DURATION: f32 = 4.0;
+/// First DASH segment number
+const DASH_START_NUMBER: u32 = 1;
+
 /// Query parameters for configurable demo endpoints
 #[derive(Debug, Deserialize)]
 pub struct DemoParams {
     /// Number of ad breaks (1-5, default: 1)
     breaks: Option<u8>,
-    /// Seconds of content between ad breaks (10, 15, 20; default: 15)
+    /// Seconds of content between ad breaks (10, 20, 30; default: 10)
     interval: Option<u8>,
 }
 
@@ -37,10 +48,10 @@ impl DemoParams {
 
     /// Validated interval in seconds, snapped to nearest allowed value
     fn interval_secs(&self) -> u8 {
-        match self.interval.unwrap_or(15) {
-            0..=12 => 10,
-            13..=17 => 15,
-            _ => 20,
+        match self.interval.unwrap_or(10) {
+            0..=14 => 10,
+            15..=24 => 20,
+            _ => 30,
         }
     }
 }
@@ -57,7 +68,7 @@ fn mux_segment_url(index: u32) -> String {
 ///
 /// # Arguments
 /// * `num_breaks` - Number of ad breaks (1-5)
-/// * `interval_secs` - Seconds of content before each break (10, 15, 20)
+/// * `interval_secs` - Seconds of content before each break (10, 20, 30)
 fn build_demo_hls(num_breaks: u8, interval_secs: u8) -> String {
     let segs_per_interval = (interval_secs as f32 / SEGMENT_DURATION) as u32;
     let mut seg_idx = MUX_START_INDEX;
@@ -130,16 +141,20 @@ fn build_demo_hls(num_breaks: u8, interval_secs: u8) -> String {
 
 /// Build a dynamic DASH demo manifest with configurable ad breaks
 ///
-/// Generates a static DASH MPD using Mux Big Buck Bunny segments with
-/// SCTE-35 EventStream signals at configurable intervals.
+/// Generates a static DASH MPD using DASH-IF Big Buck Bunny fMP4 segments
+/// with SCTE-35 EventStream signals at configurable intervals.
+///
+/// Uses fMP4 (ISO BMFF) segments from `dash.akamaized.net` — the standard
+/// segment format for DASH (unlike MPEG-TS which is HLS-only).
 fn build_demo_mpd(num_breaks: u8, interval_secs: u8) -> String {
-    let segs_per_interval = interval_secs as u32 / SEGMENT_DURATION as u32;
-    let mut seg_start = MUX_START_INDEX;
+    let dash_segs_per_interval = (interval_secs as f32 / DASH_SEGMENT_DURATION).floor() as u32;
+    let actual_interval = dash_segs_per_interval * DASH_SEGMENT_DURATION as u32;
+    let mut seg_start = DASH_START_NUMBER;
     let mut mpd = String::with_capacity(4096);
 
     // Calculate total duration
-    let content_per_break = interval_secs as u32 + BREAK_DURATION;
-    let total_duration = num_breaks as u32 * content_per_break + 30; // +30s trailing
+    let content_per_break = actual_interval + BREAK_DURATION;
+    let total_duration = num_breaks as u32 * content_per_break + 28; // +28s trailing (7 × 4s)
 
     // MPD header
     let _ = writeln!(mpd, r#"<?xml version="1.0" encoding="UTF-8"?>"#);
@@ -150,8 +165,8 @@ fn build_demo_mpd(num_breaks: u8, interval_secs: u8) -> String {
     );
 
     for break_num in 0..num_breaks {
-        let period_duration = interval_secs as u32 + BREAK_DURATION;
-        let event_time = interval_secs as u32; // Event at end of content interval
+        let period_duration = actual_interval + BREAK_DURATION;
+        let event_time = actual_interval; // Event at end of content interval
 
         // Content period with EventStream signaling the ad break
         let _ = writeln!(
@@ -160,38 +175,40 @@ fn build_demo_mpd(num_breaks: u8, interval_secs: u8) -> String {
             break_num + 1,
             period_duration
         );
-        let _ = writeln!(mpd, r#"    <BaseURL>{}/</BaseURL>"#, MUX_BASE);
+        let _ = writeln!(mpd, r#"    <BaseURL>{}/</BaseURL>"#, DASH_BASE);
 
-        // Video AdaptationSet
+        // Video AdaptationSet (fMP4)
         let _ = writeln!(
             mpd,
-            r#"    <AdaptationSet id="1" contentType="video" mimeType="video/mp2t">"#
+            r#"    <AdaptationSet id="1" contentType="video" mimeType="video/mp4">"#
         );
         let _ = writeln!(
             mpd,
-            r#"      <Representation id="video" bandwidth="800000" codecs="avc1.64001f">"#
+            r#"      <Representation id="{}" bandwidth="1013310" codecs="avc1.64001e" width="640" height="360">"#,
+            DASH_VIDEO_REP
         );
         let _ = writeln!(
             mpd,
-            r#"        <SegmentTemplate media="url_$Number$/{}" timescale="1" duration="10" startNumber="{}"/>"#,
-            MUX_SEGMENT, seg_start
+            r#"        <SegmentTemplate initialization="{0}/{0}_0.m4v" media="{0}/{0}_$Number$.m4v" timescale="30" duration="120" startNumber="{1}"/>"#,
+            DASH_VIDEO_REP, seg_start
         );
         let _ = writeln!(mpd, r#"      </Representation>"#);
         let _ = writeln!(mpd, r#"    </AdaptationSet>"#);
 
-        // Audio AdaptationSet
+        // Audio AdaptationSet (fMP4)
         let _ = writeln!(
             mpd,
             r#"    <AdaptationSet id="2" contentType="audio" mimeType="audio/mp4" lang="en">"#
         );
         let _ = writeln!(
             mpd,
-            r#"      <Representation id="audio" bandwidth="128000" codecs="mp4a.40.2">"#
+            r#"      <Representation id="{}" bandwidth="67071" codecs="mp4a.40.5" audioSamplingRate="48000">"#,
+            DASH_AUDIO_REP
         );
         let _ = writeln!(
             mpd,
-            r#"        <SegmentTemplate media="url_$Number$/{}" timescale="1" duration="10" startNumber="{}"/>"#,
-            MUX_SEGMENT, seg_start
+            r#"        <SegmentTemplate initialization="{0}/{0}_0.m4a" media="{0}/{0}_$Number$.m4a" timescale="48000" duration="192512" startNumber="{1}"/>"#,
+            DASH_AUDIO_REP, seg_start
         );
         let _ = writeln!(mpd, r#"      </Representation>"#);
         let _ = writeln!(mpd, r#"    </AdaptationSet>"#);
@@ -229,26 +246,26 @@ fn build_demo_mpd(num_breaks: u8, interval_secs: u8) -> String {
 
         let _ = writeln!(mpd, r#"  </Period>"#);
 
-        // Only advance by content segments — break segments are placeholders
-        // that get replaced by the stitcher, so they don't consume content indices
-        seg_start += segs_per_interval;
+        // Advance by content segments only — break segments are placeholders
+        seg_start += dash_segs_per_interval;
     }
 
-    // Trailing content period (30s)
-    let _ = writeln!(mpd, r#"  <Period id="content-trailing" duration="PT30S">"#);
-    let _ = writeln!(mpd, r#"    <BaseURL>{}/</BaseURL>"#, MUX_BASE);
+    // Trailing content period (28s = 7 × 4s segments)
+    let _ = writeln!(mpd, r#"  <Period id="content-trailing" duration="PT28S">"#);
+    let _ = writeln!(mpd, r#"    <BaseURL>{}/</BaseURL>"#, DASH_BASE);
     let _ = writeln!(
         mpd,
-        r#"    <AdaptationSet id="1" contentType="video" mimeType="video/mp2t">"#
+        r#"    <AdaptationSet id="1" contentType="video" mimeType="video/mp4">"#
     );
     let _ = writeln!(
         mpd,
-        r#"      <Representation id="video" bandwidth="800000" codecs="avc1.64001f">"#
+        r#"      <Representation id="{}" bandwidth="1013310" codecs="avc1.64001e" width="640" height="360">"#,
+        DASH_VIDEO_REP
     );
     let _ = writeln!(
         mpd,
-        r#"        <SegmentTemplate media="url_$Number$/{}" timescale="1" duration="10" startNumber="{}"/>"#,
-        MUX_SEGMENT, seg_start
+        r#"        <SegmentTemplate initialization="{0}/{0}_0.m4v" media="{0}/{0}_$Number$.m4v" timescale="30" duration="120" startNumber="{1}"/>"#,
+        DASH_VIDEO_REP, seg_start
     );
     let _ = writeln!(mpd, r#"      </Representation>"#);
     let _ = writeln!(mpd, r#"    </AdaptationSet>"#);
@@ -258,12 +275,13 @@ fn build_demo_mpd(num_breaks: u8, interval_secs: u8) -> String {
     );
     let _ = writeln!(
         mpd,
-        r#"      <Representation id="audio" bandwidth="128000" codecs="mp4a.40.2">"#
+        r#"      <Representation id="{}" bandwidth="67071" codecs="mp4a.40.5" audioSamplingRate="48000">"#,
+        DASH_AUDIO_REP
     );
     let _ = writeln!(
         mpd,
-        r#"        <SegmentTemplate media="url_$Number$/{}" timescale="1" duration="10" startNumber="{}"/>"#,
-        MUX_SEGMENT, seg_start
+        r#"        <SegmentTemplate initialization="{0}/{0}_0.m4a" media="{0}/{0}_$Number$.m4a" timescale="48000" duration="192512" startNumber="{1}"/>"#,
+        DASH_AUDIO_REP, seg_start
     );
     let _ = writeln!(mpd, r#"      </Representation>"#);
     let _ = writeln!(mpd, r#"    </AdaptationSet>"#);
@@ -281,12 +299,12 @@ fn build_demo_mpd(num_breaks: u8, interval_secs: u8) -> String {
 ///
 /// # Query Parameters
 /// * `breaks` — Number of ad breaks, 1-5 (default: 1)
-/// * `interval` — Seconds between breaks: 10, 15, or 20 (default: 15)
+/// * `interval` — Seconds between breaks: 10, 20, or 30 (default: 10)
 ///
 /// # Usage
 /// ```text
 /// GET /demo/playlist.m3u8                      → 1 break, 15s interval
-/// GET /demo/playlist.m3u8?breaks=3&interval=20 → 3 breaks, 20s apart
+/// GET /demo/playlist.m3u8?breaks=3&interval=30 → 3 breaks, 30s apart
 /// ```
 pub async fn serve_demo_playlist(Query(params): Query<DemoParams>) -> Response {
     let num_breaks = params.num_breaks();
@@ -319,7 +337,7 @@ pub async fn serve_demo_playlist(Query(params): Query<DemoParams>) -> Response {
 /// SCTE-35 EventStream signals at configurable positions.
 ///
 /// # Query Parameters
-/// Same as the HLS endpoint: `breaks` (1-5) and `interval` (10, 15, 20).
+/// Same as the HLS endpoint: `breaks` (1-5) and `interval` (10, 20, 30).
 pub async fn serve_demo_manifest(Query(params): Query<DemoParams>) -> Response {
     let num_breaks = params.num_breaks();
     let interval = params.interval_secs();
@@ -391,7 +409,7 @@ fn write_ll_hls_segment(playlist: &mut String, seg_idx: u32) {
 ///
 /// # Arguments
 /// * `num_breaks` - Number of ad breaks (1-5)
-/// * `interval_secs` - Seconds of content before each break (10, 15, 20)
+/// * `interval_secs` - Seconds of content before each break (10, 20, 30)
 fn build_demo_ll_hls(num_breaks: u8, interval_secs: u8) -> String {
     // Each full segment ≈ 1s (3 parts × 0.33334s)
     let segs_per_interval = interval_secs as u32;
@@ -477,12 +495,12 @@ fn build_demo_ll_hls(num_breaks: u8, interval_secs: u8) -> String {
 ///
 /// # Query Parameters
 /// * `breaks` — Number of ad breaks, 1-5 (default: 1)
-/// * `interval` — Seconds between breaks: 10, 15, or 20 (default: 15)
+/// * `interval` — Seconds between breaks: 10, 20, or 30 (default: 10)
 ///
 /// # Usage
 /// ```text
 /// GET /demo/ll-hls/playlist.m3u8                      → 1 break, 15s interval
-/// GET /demo/ll-hls/playlist.m3u8?breaks=3&interval=20 → 3 breaks, 20s apart
+/// GET /demo/ll-hls/playlist.m3u8?breaks=3&interval=30 → 3 breaks, 30s apart
 /// ```
 pub async fn serve_demo_ll_hls_playlist(Query(params): Query<DemoParams>) -> Response {
     let num_breaks = params.num_breaks();
@@ -514,7 +532,7 @@ mod tests {
             interval: None,
         };
         assert_eq!(params.num_breaks(), 1);
-        assert_eq!(params.interval_secs(), 15);
+        assert_eq!(params.interval_secs(), 10);
     }
 
     #[test]
@@ -543,18 +561,24 @@ mod tests {
             breaks: None,
             interval: Some(14),
         };
-        assert_eq!(p.interval_secs(), 15);
+        assert_eq!(p.interval_secs(), 10);
 
         let p = DemoParams {
             breaks: None,
-            interval: Some(25),
+            interval: Some(22),
         };
         assert_eq!(p.interval_secs(), 20);
+
+        let p = DemoParams {
+            breaks: None,
+            interval: Some(35),
+        };
+        assert_eq!(p.interval_secs(), 30);
     }
 
     #[test]
     fn test_build_demo_hls_single_break() {
-        let playlist = build_demo_hls(1, 15);
+        let playlist = build_demo_hls(1, 10);
 
         // Should contain header
         assert!(playlist.contains("#EXTM3U"));
@@ -573,8 +597,7 @@ mod tests {
             "Expected 1 CUE-IN"
         );
 
-        // 15s interval = 1 content seg (10s rounded), then 1 break seg, then 3 trailing
-        // 15/10 = 1.5 → truncated to 1 content segment before break
+        // 10s interval = 1 content seg, then 1 break seg, then 3 trailing
         let seg_count = playlist.matches("#EXTINF:").count();
         // 1 content + 1 break + 3 trailing = 5 segments
         assert_eq!(seg_count, 5, "Expected 5 segments");
@@ -583,24 +606,24 @@ mod tests {
     }
 
     #[test]
-    fn test_build_demo_hls_five_breaks_20s() {
-        let playlist = build_demo_hls(5, 20);
+    fn test_build_demo_hls_five_breaks_30s() {
+        let playlist = build_demo_hls(5, 30);
 
         // 5 CUE-OUT/CUE-IN pairs
         assert_eq!(playlist.matches("#EXT-X-CUE-OUT:10").count(), 5);
         assert_eq!(playlist.matches("#EXT-X-CUE-IN").count(), 5);
 
-        // 20s interval = 2 content segs per break, 1 break seg per break, 3 trailing
-        // 5 * (2 + 1) + 3 = 18 segments
+        // 30s interval = 3 content segs per break, 1 break seg per break, 3 trailing
+        // 5 * (3 + 1) + 3 = 23 segments
         let seg_count = playlist.matches("#EXTINF:").count();
-        assert_eq!(seg_count, 18, "Expected 18 segments for 5 breaks @ 20s");
+        assert_eq!(seg_count, 23, "Expected 23 segments for 5 breaks @ 30s");
     }
 
     #[test]
     fn test_build_demo_hls_segment_urls_are_valid() {
         let playlist = build_demo_hls(1, 10);
 
-        // All segments should reference Mux test streams
+        // All HLS segments should reference Mux test streams (MPEG-TS)
         for line in playlist.lines() {
             if line.starts_with("https://") {
                 assert!(
@@ -614,8 +637,28 @@ mod tests {
     }
 
     #[test]
+    fn test_build_demo_mpd_segment_urls_are_fmp4() {
+        let mpd = build_demo_mpd(1, 10);
+
+        // DASH segments should reference DASH-IF Akamai CDN (fMP4)
+        assert!(
+            mpd.contains("dash.akamaized.net"),
+            "DASH should use DASH-IF CDN"
+        );
+        // Must NOT reference Mux MPEG-TS segments
+        assert!(
+            !mpd.contains("test-streams.mux.dev"),
+            "DASH must not use Mux MPEG-TS segments"
+        );
+        assert!(
+            !mpd.contains(".ts\""),
+            "DASH must not reference .ts segments"
+        );
+    }
+
+    #[test]
     fn test_build_demo_mpd_single_break() {
-        let mpd = build_demo_mpd(1, 15);
+        let mpd = build_demo_mpd(1, 10);
 
         assert!(mpd.contains("<?xml version"));
         assert!(mpd.contains("<MPD"));
@@ -623,6 +666,18 @@ mod tests {
         // Should have content period + trailing period
         assert!(mpd.contains(r#"id="content-1""#));
         assert!(mpd.contains(r#"id="content-trailing""#));
+
+        // Should use fMP4 (video/mp4), not MPEG-TS
+        assert!(
+            mpd.contains(r#"mimeType="video/mp4""#),
+            "DASH must use video/mp4 (fMP4), not video/mp2t"
+        );
+        assert!(!mpd.contains(r#"mimeType="video/mp2t""#));
+
+        // Should reference DASH-IF Akamai segments
+        assert!(mpd.contains("dash.akamaized.net"));
+        assert!(mpd.contains(".m4v"));
+        assert!(mpd.contains(".m4a"));
 
         // Should have 1 SCTE-35 event
         assert_eq!(
@@ -637,7 +692,7 @@ mod tests {
 
     #[test]
     fn test_build_demo_mpd_five_breaks() {
-        let mpd = build_demo_mpd(5, 20);
+        let mpd = build_demo_mpd(5, 30);
 
         // 5 content periods + 1 trailing
         for i in 1..=5 {
@@ -666,12 +721,28 @@ mod tests {
     fn test_build_demo_mpd_segment_start_numbers_increment() {
         let mpd = build_demo_mpd(2, 10);
 
-        // First period starts at 462
-        assert!(mpd.contains(r#"startNumber="462""#));
+        // First period starts at 1 (DASH_START_NUMBER)
+        assert!(mpd.contains(r#"startNumber="1""#));
 
-        // Second period: 1 content seg (10s/10s), break segments don't advance
-        // So second period starts at 462 + 1 = 463
-        assert!(mpd.contains(r#"startNumber="463""#));
+        // 10s interval / 4s segments = 2 segments per interval
+        // Second period starts at 1 + 2 = 3
+        assert!(mpd.contains(r#"startNumber="3""#));
+
+        // Trailing period starts at 3 + 2 = 5
+        assert!(mpd.contains(r#"startNumber="5""#));
+    }
+
+    #[test]
+    fn test_build_demo_mpd_has_init_segments() {
+        let mpd = build_demo_mpd(1, 10);
+
+        // fMP4 requires initialization segments
+        assert!(
+            mpd.contains("initialization="),
+            "DASH fMP4 must have initialization segments"
+        );
+        assert!(mpd.contains("_0.m4v"), "Video init segment missing");
+        assert!(mpd.contains("_0.m4a"), "Audio init segment missing");
     }
 
     // -- LL-HLS demo tests --------------------------------------------------
@@ -740,7 +811,7 @@ mod tests {
 
     #[test]
     fn test_build_demo_ll_hls_multiple_breaks() {
-        let playlist = build_demo_ll_hls(3, 15);
+        let playlist = build_demo_ll_hls(3, 10);
 
         assert_eq!(playlist.matches("#EXT-X-CUE-OUT:").count(), 3);
         assert_eq!(playlist.matches("#EXT-X-CUE-IN").count(), 3);

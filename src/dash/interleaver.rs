@@ -1,6 +1,8 @@
 use crate::ad::provider::AdSegment;
 use crate::dash::cue::DashAdBreak;
-use dash_mpd::{AdaptationSet, MPD, Period, Representation, SegmentList, SegmentURL};
+use dash_mpd::{
+    AdaptationSet, Initialization, MPD, Period, Representation, SegmentList, SegmentURL,
+};
 use std::time::Duration;
 use tracing::{info, warn};
 
@@ -103,21 +105,20 @@ pub fn interleave_ads_mpd(
 /// Create a DASH Period containing ad content with SegmentList
 ///
 /// Mirrors the content Period's AdaptationSet structure so that all tracks
-/// (video, audio, etc.) are present in the ad Period. Since ad creatives are
-/// typically muxed, the same SegmentList URLs are shared across all tracks.
+/// (video, audio, etc.) are present in the ad Period. Each track gets its own
+/// init and data segment URLs with a track-type prefix (`v` for video, `a` for
+/// audio) so the ad provider can resolve them to the correct demuxed files.
+///
+/// Uses `.m4s` segment names (fMP4 format required by DASH) and includes
+/// `Initialization`, `duration`, and `timescale` in the SegmentList so DASH
+/// players can correctly parse the segment timeline.
+///
+/// Codec info (`codecs`, `width`, `height`, `audioSamplingRate`) is copied from
+/// the content Representations so the player can set up MediaSource buffers with
+/// matching parameters.
 ///
 /// Falls back to a single video-only AdaptationSet when no content AdaptationSets
 /// are available (backward compatibility).
-///
-/// # Arguments
-/// * `ad_segments` - Ad segments to include in this Period
-/// * `break_idx` - Index of this ad break (for ID generation)
-/// * `session_id` - Session ID for URL generation
-/// * `base_url` - Stitcher base URL for proxying
-/// * `content_adaptations` - AdaptationSets from the content Period to mirror
-///
-/// # Returns
-/// A Period with ad content matching the content track structure
 fn create_ad_period(
     ad_segments: &[AdSegment],
     break_idx: usize,
@@ -128,23 +129,20 @@ fn create_ad_period(
     // Calculate total duration
     let total_duration: f64 = ad_segments.iter().map(|s| s.duration as f64).sum();
 
-    // Create SegmentURL entries for each ad segment (shared across all tracks)
-    let segment_urls: Vec<SegmentURL> = ad_segments
-        .iter()
-        .enumerate()
-        .map(|(seg_idx, _seg)| SegmentURL {
-            media: Some(format!(
-                "{}/stitch/{}/ad/break-{}-seg-{}.ts",
-                base_url, session_id, break_idx, seg_idx
-            )),
-            ..Default::default()
-        })
-        .collect();
+    // Segment duration in timescale units (timescale=1 → 1 unit = 1 second)
+    let seg_duration = ad_segments.first().map(|s| s.duration as u64).unwrap_or(1);
 
     // Mirror content AdaptationSets, or fall back to single video
     let adaptations = if content_adaptations.is_empty() {
+        let init_url = format!(
+            "{}/stitch/{}/ad/break-{}-vinit.m4s",
+            base_url, session_id, break_idx
+        );
+        let segment_urls = build_segment_urls(ad_segments, base_url, session_id, break_idx, "v");
         vec![create_fallback_video_adaptation_set(
             break_idx,
+            &init_url,
+            seg_duration,
             segment_urls,
         )]
     } else {
@@ -152,17 +150,41 @@ fn create_ad_period(
             .iter()
             .enumerate()
             .map(|(as_idx, content_as)| {
-                let bw = content_as
-                    .representations
-                    .first()
-                    .and_then(|r| r.bandwidth)
-                    .unwrap_or(500_000);
+                // Determine track type prefix from contentType (v=video, a=audio)
+                let track_prefix = match content_as.contentType.as_deref() {
+                    Some("audio") => "a",
+                    _ => "v", // default to video for unknown types
+                };
+
+                // Track-specific init segment URL
+                let init_url = format!(
+                    "{}/stitch/{}/ad/break-{}-{}init.m4s",
+                    base_url, session_id, break_idx, track_prefix
+                );
+
+                // Track-specific data segment URLs
+                let segment_urls =
+                    build_segment_urls(ad_segments, base_url, session_id, break_idx, track_prefix);
+
+                // Copy codec info from content Representation
+                let content_rep = content_as.representations.first();
+                let bw = content_rep.and_then(|r| r.bandwidth).unwrap_or(500_000);
 
                 let representation = Representation {
                     id: Some(format!("ad-rep-{}-{}", break_idx, as_idx)),
                     bandwidth: Some(bw),
+                    codecs: content_rep.and_then(|r| r.codecs.clone()),
+                    width: content_rep.and_then(|r| r.width),
+                    height: content_rep.and_then(|r| r.height),
+                    audioSamplingRate: content_rep.and_then(|r| r.audioSamplingRate.clone()),
                     SegmentList: Some(SegmentList {
-                        segment_urls: segment_urls.clone(),
+                        timescale: Some(1),
+                        duration: Some(seg_duration),
+                        Initialization: Some(Initialization {
+                            sourceURL: Some(init_url),
+                            ..Default::default()
+                        }),
+                        segment_urls,
                         ..Default::default()
                     }),
                     ..Default::default()
@@ -188,15 +210,45 @@ fn create_ad_period(
     }
 }
 
+/// Build track-specific SegmentURL entries for an ad break
+fn build_segment_urls(
+    ad_segments: &[AdSegment],
+    base_url: &str,
+    session_id: &str,
+    break_idx: usize,
+    track_prefix: &str,
+) -> Vec<SegmentURL> {
+    ad_segments
+        .iter()
+        .enumerate()
+        .map(|(seg_idx, _seg)| SegmentURL {
+            media: Some(format!(
+                "{}/stitch/{}/ad/break-{}-{}seg-{}.m4s",
+                base_url, session_id, break_idx, track_prefix, seg_idx
+            )),
+            ..Default::default()
+        })
+        .collect()
+}
+
 /// Fallback: create a single video-only AdaptationSet (backward compatibility)
 fn create_fallback_video_adaptation_set(
     break_idx: usize,
+    init_url: &str,
+    seg_duration: u64,
     segment_urls: Vec<SegmentURL>,
 ) -> AdaptationSet {
     let representation = Representation {
         id: Some(format!("ad-rep-{}", break_idx)),
         bandwidth: Some(500_000),
+        codecs: Some("avc1.64001e".to_string()),
         SegmentList: Some(SegmentList {
+            timescale: Some(1),
+            duration: Some(seg_duration),
+            Initialization: Some(Initialization {
+                sourceURL: Some(init_url.to_string()),
+                ..Default::default()
+            }),
             segment_urls,
             ..Default::default()
         }),
@@ -229,6 +281,7 @@ mod tests {
     }
 
     /// Create a test MPD where each Period has video + audio AdaptationSets
+    /// with codec info matching DASH-IF Big Buck Bunny
     fn create_test_mpd_multi_track(count: usize) -> MPD {
         let mut mpd = MPD::default();
         for i in 0..count {
@@ -239,12 +292,27 @@ mod tests {
                     AdaptationSet {
                         contentType: Some("video".to_string()),
                         mimeType: Some("video/mp4".to_string()),
+                        representations: vec![Representation {
+                            id: Some("video-rep".to_string()),
+                            bandwidth: Some(1_000_000),
+                            codecs: Some("avc1.64001e".to_string()),
+                            width: Some(640),
+                            height: Some(360),
+                            ..Default::default()
+                        }],
                         ..Default::default()
                     },
                     AdaptationSet {
                         contentType: Some("audio".to_string()),
                         mimeType: Some("audio/mp4".to_string()),
                         lang: Some("en".to_string()),
+                        representations: vec![Representation {
+                            id: Some("audio-rep".to_string()),
+                            bandwidth: Some(67_000),
+                            codecs: Some("mp4a.40.5".to_string()),
+                            audioSamplingRate: Some("48000".to_string()),
+                            ..Default::default()
+                        }],
                         ..Default::default()
                     },
                 ],
@@ -428,11 +496,15 @@ mod tests {
         assert_eq!(segment_list.segment_urls.len(), 2);
         assert_eq!(
             segment_list.segment_urls[0].media,
-            Some("https://stitcher.example.com/stitch/session123/ad/break-0-seg-0.ts".to_string())
+            Some(
+                "https://stitcher.example.com/stitch/session123/ad/break-0-vseg-0.m4s".to_string()
+            )
         );
         assert_eq!(
             segment_list.segment_urls[1].media,
-            Some("https://stitcher.example.com/stitch/session123/ad/break-0-seg-1.ts".to_string())
+            Some(
+                "https://stitcher.example.com/stitch/session123/ad/break-0-vseg-1.m4s".to_string()
+            )
         );
     }
 
@@ -535,7 +607,77 @@ mod tests {
     }
 
     #[test]
-    fn test_ad_period_shared_segment_urls_across_tracks() {
+    fn test_ad_period_has_initialization_and_timing() {
+        let mpd = create_test_mpd_multi_track(1);
+
+        let ad_breaks = vec![create_test_ad_break(0, 10.0)];
+        let ad_segments = vec![vec![AdSegment {
+            uri: "ad.ts".to_string(),
+            duration: 1.0,
+            tracking: None,
+        }]];
+
+        let result = interleave_ads_mpd(mpd, &ad_breaks, &ad_segments, "test", "http://test");
+
+        let ad_period = &result.periods[1];
+
+        // Video AdaptationSet
+        let video_seg_list = ad_period.adaptations[0].representations[0]
+            .SegmentList
+            .as_ref()
+            .unwrap();
+
+        assert_eq!(video_seg_list.timescale, Some(1));
+        assert_eq!(video_seg_list.duration, Some(1));
+        assert!(video_seg_list.Initialization.is_some());
+        let video_init = video_seg_list.Initialization.as_ref().unwrap();
+        assert!(
+            video_init
+                .sourceURL
+                .as_ref()
+                .unwrap()
+                .contains("break-0-vinit.m4s"),
+            "Video init URL should use vinit prefix"
+        );
+
+        // Audio AdaptationSet
+        let audio_seg_list = ad_period.adaptations[1].representations[0]
+            .SegmentList
+            .as_ref()
+            .unwrap();
+
+        assert_eq!(audio_seg_list.timescale, Some(1));
+        assert!(audio_seg_list.Initialization.is_some());
+        let audio_init = audio_seg_list.Initialization.as_ref().unwrap();
+        assert!(
+            audio_init
+                .sourceURL
+                .as_ref()
+                .unwrap()
+                .contains("break-0-ainit.m4s"),
+            "Audio init URL should use ainit prefix"
+        );
+
+        // All segment URLs should use .m4s extension
+        for as_set in &ad_period.adaptations {
+            for seg_url in &as_set.representations[0]
+                .SegmentList
+                .as_ref()
+                .unwrap()
+                .segment_urls
+            {
+                let media = seg_url.media.as_ref().unwrap();
+                assert!(
+                    media.ends_with(".m4s"),
+                    "DASH ad segments must use .m4s extension, got: {}",
+                    media
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_ad_period_track_specific_urls() {
         let mpd = create_test_mpd_multi_track(1);
 
         let ad_breaks = vec![create_test_ad_break(0, 20.0)];
@@ -556,26 +698,72 @@ mod tests {
 
         let ad_period = &result.periods[1];
 
-        // Both AdaptationSets should have identical SegmentList URLs
+        // Video URLs should use "vseg" prefix
         let video_urls: Vec<_> = ad_period.adaptations[0].representations[0]
             .SegmentList
             .as_ref()
             .unwrap()
             .segment_urls
             .iter()
-            .map(|u| u.media.as_ref().unwrap())
+            .map(|u| u.media.as_ref().unwrap().clone())
             .collect();
 
+        assert!(
+            video_urls[0].contains("vseg-0.m4s"),
+            "Video should use vseg prefix"
+        );
+        assert!(
+            video_urls[1].contains("vseg-1.m4s"),
+            "Video should use vseg prefix"
+        );
+
+        // Audio URLs should use "aseg" prefix
         let audio_urls: Vec<_> = ad_period.adaptations[1].representations[0]
             .SegmentList
             .as_ref()
             .unwrap()
             .segment_urls
             .iter()
-            .map(|u| u.media.as_ref().unwrap())
+            .map(|u| u.media.as_ref().unwrap().clone())
             .collect();
 
-        assert_eq!(video_urls, audio_urls);
-        assert_eq!(video_urls.len(), 2);
+        assert!(
+            audio_urls[0].contains("aseg-0.m4s"),
+            "Audio should use aseg prefix"
+        );
+        assert!(
+            audio_urls[1].contains("aseg-1.m4s"),
+            "Audio should use aseg prefix"
+        );
+
+        // Video and audio URLs must be different
+        assert_ne!(video_urls, audio_urls);
+    }
+
+    #[test]
+    fn test_ad_period_copies_codec_info() {
+        let mpd = create_test_mpd_multi_track(1);
+
+        let ad_breaks = vec![create_test_ad_break(0, 10.0)];
+        let ad_segments = vec![vec![AdSegment {
+            uri: "ad.ts".to_string(),
+            duration: 10.0,
+            tracking: None,
+        }]];
+
+        let result = interleave_ads_mpd(mpd, &ad_breaks, &ad_segments, "test", "http://test");
+
+        let ad_period = &result.periods[1];
+
+        // Video Representation should have codecs, width, height from content
+        let video_rep = &ad_period.adaptations[0].representations[0];
+        assert_eq!(video_rep.codecs, Some("avc1.64001e".to_string()));
+        assert_eq!(video_rep.width, Some(640));
+        assert_eq!(video_rep.height, Some(360));
+
+        // Audio Representation should have codecs, audioSamplingRate from content
+        let audio_rep = &ad_period.adaptations[1].representations[0];
+        assert_eq!(audio_rep.codecs, Some("mp4a.40.5".to_string()));
+        assert_eq!(audio_rep.audioSamplingRate, Some("48000".to_string()));
     }
 }

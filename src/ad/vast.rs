@@ -32,6 +32,8 @@ pub struct InLineAd {
     pub creatives: Vec<Creative>,
     pub impression_urls: Vec<String>,
     pub error_url: Option<String>,
+    /// OMID verification resources from `<AdVerifications>`
+    pub verifications: Vec<Verification>,
 }
 
 /// Wrapper ad that references another VAST tag
@@ -40,6 +42,8 @@ pub struct WrapperAd {
     pub ad_tag_uri: String,
     pub impression_urls: Vec<String>,
     pub tracking_events: Vec<TrackingEvent>,
+    /// OMID verification resources from `<AdVerifications>` in the wrapper
+    pub verifications: Vec<Verification>,
 }
 
 /// A creative containing linear video content
@@ -74,6 +78,33 @@ pub struct MediaFile {
 pub struct TrackingEvent {
     pub event: String,
     pub url: String,
+}
+
+/// A single OM SDK verification resource from `<AdVerifications>`.
+///
+/// OMID (Open Measurement Interface Definition) verification nodes allow
+/// third-party viewability/measurement scripts to be passed through to the
+/// player. In SGAI mode these are serialized in the asset-list JSON so the
+/// client-side player can load the verification JS.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Verification {
+    /// Vendor key, e.g. "doubleverify.com-omid"
+    pub vendor: Option<String>,
+    /// URL to the verification JavaScript resource
+    pub javascript_resource_url: Option<String>,
+    /// API framework, expected value: "omid"
+    pub api_framework: Option<String>,
+    /// Optional `<VerificationParameters>` CDATA content (opaque string)
+    pub parameters: Option<String>,
+    /// Optional tracking events within this `<Verification>` node
+    pub tracking_events: Vec<VerificationTrackingEvent>,
+}
+
+/// Tracking event within a `<Verification>` node (e.g. `verificationNotExecuted`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct VerificationTrackingEvent {
+    pub event: String,
+    pub uri: String,
 }
 
 /// Parse VAST XML into structured data
@@ -153,6 +184,7 @@ fn parse_inline(reader: &mut Reader<&[u8]>) -> Result<InLineAd> {
     let mut creatives = Vec::new();
     let mut impression_urls = Vec::new();
     let mut error_url = None;
+    let mut verifications = Vec::new();
 
     loop {
         match reader.read_event() {
@@ -174,6 +206,9 @@ fn parse_inline(reader: &mut Reader<&[u8]>) -> Result<InLineAd> {
             Ok(Event::Start(ref e)) if e.name().as_ref() == b"Creatives" => {
                 creatives = parse_creatives(reader)?;
             }
+            Ok(Event::Start(ref e)) if e.name().as_ref() == b"AdVerifications" => {
+                verifications = parse_ad_verifications(reader)?;
+            }
             Ok(Event::End(ref e)) if e.name().as_ref() == b"InLine" => break,
             Ok(Event::Eof) => break,
             Err(e) => {
@@ -192,6 +227,7 @@ fn parse_inline(reader: &mut Reader<&[u8]>) -> Result<InLineAd> {
         creatives,
         impression_urls,
         error_url,
+        verifications,
     })
 }
 
@@ -200,6 +236,7 @@ fn parse_wrapper(reader: &mut Reader<&[u8]>) -> Result<WrapperAd> {
     let mut ad_tag_uri = String::new();
     let mut impression_urls = Vec::new();
     let mut tracking_events = Vec::new();
+    let mut verifications = Vec::new();
 
     loop {
         match reader.read_event() {
@@ -214,6 +251,9 @@ fn parse_wrapper(reader: &mut Reader<&[u8]>) -> Result<WrapperAd> {
             }
             Ok(Event::Start(ref e)) if e.name().as_ref() == b"TrackingEvents" => {
                 tracking_events = parse_tracking_events(reader)?;
+            }
+            Ok(Event::Start(ref e)) if e.name().as_ref() == b"AdVerifications" => {
+                verifications = parse_ad_verifications(reader)?;
             }
             Ok(Event::End(ref e)) if e.name().as_ref() == b"Wrapper" => break,
             Ok(Event::Eof) => break,
@@ -231,6 +271,7 @@ fn parse_wrapper(reader: &mut Reader<&[u8]>) -> Result<WrapperAd> {
         ad_tag_uri,
         impression_urls,
         tracking_events,
+        verifications,
     })
 }
 
@@ -382,6 +423,109 @@ fn parse_tracking_events(reader: &mut Reader<&[u8]>) -> Result<Vec<TrackingEvent
             Err(e) => {
                 return Err(RitcherError::InternalError(format!(
                     "VAST XML parse error in TrackingEvents: {}",
+                    e
+                )));
+            }
+            _ => {}
+        }
+    }
+
+    Ok(events)
+}
+
+/// Parse `<AdVerifications>` element containing one or more `<Verification>` children
+fn parse_ad_verifications(reader: &mut Reader<&[u8]>) -> Result<Vec<Verification>> {
+    let mut verifications = Vec::new();
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(ref e)) if e.name().as_ref() == b"Verification" => {
+                let vendor = get_attr(e, "vendor");
+                let api_framework = get_attr(e, "apiFramework");
+                let verification = parse_verification(reader, vendor, api_framework)?;
+                verifications.push(verification);
+            }
+            Ok(Event::End(ref e)) if e.name().as_ref() == b"AdVerifications" => break,
+            Ok(Event::Eof) => break,
+            Err(e) => {
+                return Err(RitcherError::InternalError(format!(
+                    "VAST XML parse error in AdVerifications: {}",
+                    e
+                )));
+            }
+            _ => {}
+        }
+    }
+
+    Ok(verifications)
+}
+
+/// Parse a single `<Verification>` element
+fn parse_verification(
+    reader: &mut Reader<&[u8]>,
+    vendor: Option<String>,
+    api_framework: Option<String>,
+) -> Result<Verification> {
+    let mut javascript_resource_url = None;
+    let mut parameters = None;
+    let mut tracking_events = Vec::new();
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(ref e)) if e.name().as_ref() == b"JavaScriptResource" => {
+                let url = read_text(reader, "JavaScriptResource")?;
+                if !url.is_empty() {
+                    javascript_resource_url = Some(url);
+                }
+            }
+            Ok(Event::Start(ref e)) if e.name().as_ref() == b"VerificationParameters" => {
+                let params = read_text(reader, "VerificationParameters")?;
+                if !params.is_empty() {
+                    parameters = Some(params);
+                }
+            }
+            Ok(Event::Start(ref e)) if e.name().as_ref() == b"TrackingEvents" => {
+                tracking_events = parse_verification_tracking_events(reader)?;
+            }
+            Ok(Event::End(ref e)) if e.name().as_ref() == b"Verification" => break,
+            Ok(Event::Eof) => break,
+            Err(e) => {
+                return Err(RitcherError::InternalError(format!(
+                    "VAST XML parse error in Verification: {}",
+                    e
+                )));
+            }
+            _ => {}
+        }
+    }
+
+    Ok(Verification {
+        vendor,
+        javascript_resource_url,
+        api_framework,
+        parameters,
+        tracking_events,
+    })
+}
+
+/// Parse `<TrackingEvents>` within a `<Verification>` node
+fn parse_verification_tracking_events(
+    reader: &mut Reader<&[u8]>,
+) -> Result<Vec<VerificationTrackingEvent>> {
+    let mut events = Vec::new();
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(ref e)) if e.name().as_ref() == b"Tracking" => {
+                let event = get_attr(e, "event").unwrap_or_default();
+                let uri = read_text(reader, "Tracking")?.trim().to_string();
+                events.push(VerificationTrackingEvent { event, uri });
+            }
+            Ok(Event::End(ref e)) if e.name().as_ref() == b"TrackingEvents" => break,
+            Ok(Event::Eof) => break,
+            Err(e) => {
+                return Err(RitcherError::InternalError(format!(
+                    "VAST XML parse error in Verification TrackingEvents: {}",
                     e
                 )));
             }
@@ -855,5 +999,254 @@ mod tests {
             best.url, "https://example.com/high.mp4",
             "Should pick highest bitrate MP4"
         );
+    }
+
+    // ── OMID <AdVerifications> tests ─────────────────────────────────
+
+    const VAST_INLINE_WITH_VERIFICATIONS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<VAST version="4.1">
+  <Ad id="omid-ad">
+    <InLine>
+      <AdSystem>TestAds</AdSystem>
+      <AdTitle>OMID Ad</AdTitle>
+      <Impression>http://example.com/impression</Impression>
+      <AdVerifications>
+        <Verification vendor="doubleverify.com-omid" apiFramework="omid">
+          <JavaScriptResource><![CDATA[https://cdn.doubleverify.com/dvtp_src.js]]></JavaScriptResource>
+          <VerificationParameters><![CDATA[ctx=123&cmp=abc]]></VerificationParameters>
+          <TrackingEvents>
+            <Tracking event="verificationNotExecuted">https://verify.example.com/failed</Tracking>
+          </TrackingEvents>
+        </Verification>
+        <Verification vendor="ias.com-omid" apiFramework="omid">
+          <JavaScriptResource>https://cdn.ias.com/omid.js</JavaScriptResource>
+        </Verification>
+      </AdVerifications>
+      <Creatives>
+        <Creative id="c1">
+          <Linear>
+            <Duration>00:00:30</Duration>
+            <MediaFiles>
+              <MediaFile delivery="progressive" type="video/mp4" width="1280" height="720">
+                https://example.com/ad.mp4
+              </MediaFile>
+            </MediaFiles>
+          </Linear>
+        </Creative>
+      </Creatives>
+    </InLine>
+  </Ad>
+</VAST>"#;
+
+    #[test]
+    fn test_parse_inline_with_ad_verifications() {
+        let result = parse_vast(VAST_INLINE_WITH_VERIFICATIONS).unwrap();
+        assert_eq!(result.ads.len(), 1);
+
+        let ad = &result.ads[0];
+        if let VastAdType::InLine(inline) = &ad.ad_type {
+            assert_eq!(inline.verifications.len(), 2);
+
+            // First verification: DoubleVerify
+            let dv = &inline.verifications[0];
+            assert_eq!(dv.vendor.as_deref(), Some("doubleverify.com-omid"));
+            assert_eq!(dv.api_framework.as_deref(), Some("omid"));
+            assert_eq!(
+                dv.javascript_resource_url.as_deref(),
+                Some("https://cdn.doubleverify.com/dvtp_src.js")
+            );
+            assert_eq!(dv.parameters.as_deref(), Some("ctx=123&cmp=abc"));
+            assert_eq!(dv.tracking_events.len(), 1);
+            assert_eq!(dv.tracking_events[0].event, "verificationNotExecuted");
+            assert_eq!(
+                dv.tracking_events[0].uri,
+                "https://verify.example.com/failed"
+            );
+
+            // Second verification: IAS (minimal — no params, no tracking)
+            let ias = &inline.verifications[1];
+            assert_eq!(ias.vendor.as_deref(), Some("ias.com-omid"));
+            assert_eq!(ias.api_framework.as_deref(), Some("omid"));
+            assert_eq!(
+                ias.javascript_resource_url.as_deref(),
+                Some("https://cdn.ias.com/omid.js")
+            );
+            assert!(ias.parameters.is_none());
+            assert!(ias.tracking_events.is_empty());
+        } else {
+            panic!("Expected InLine ad");
+        }
+    }
+
+    #[test]
+    fn test_parse_inline_without_verifications() {
+        // The standard VAST_INLINE constant has no <AdVerifications>
+        let result = parse_vast(VAST_INLINE).unwrap();
+        if let VastAdType::InLine(inline) = &result.ads[0].ad_type {
+            assert!(
+                inline.verifications.is_empty(),
+                "InLine without AdVerifications should have empty vec"
+            );
+        } else {
+            panic!("Expected InLine ad");
+        }
+    }
+
+    #[test]
+    fn test_parse_wrapper_with_verifications() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<VAST version="4.1">
+  <Ad id="wrapper-v">
+    <Wrapper>
+      <VASTAdTagURI>http://example.com/vast-inline.xml</VASTAdTagURI>
+      <Impression>http://example.com/wrapper-imp</Impression>
+      <AdVerifications>
+        <Verification vendor="moat.com-omid" apiFramework="omid">
+          <JavaScriptResource>https://cdn.moat.com/omid.js</JavaScriptResource>
+          <VerificationParameters>moat_partner=abc123</VerificationParameters>
+        </Verification>
+      </AdVerifications>
+    </Wrapper>
+  </Ad>
+</VAST>"#;
+        let result = parse_vast(xml).unwrap();
+        if let VastAdType::Wrapper(wrapper) = &result.ads[0].ad_type {
+            assert_eq!(wrapper.verifications.len(), 1);
+            let v = &wrapper.verifications[0];
+            assert_eq!(v.vendor.as_deref(), Some("moat.com-omid"));
+            assert_eq!(
+                v.javascript_resource_url.as_deref(),
+                Some("https://cdn.moat.com/omid.js")
+            );
+            assert_eq!(v.parameters.as_deref(), Some("moat_partner=abc123"));
+        } else {
+            panic!("Expected Wrapper ad");
+        }
+    }
+
+    #[test]
+    fn test_parse_wrapper_without_verifications() {
+        let result = parse_vast(VAST_WRAPPER).unwrap();
+        if let VastAdType::Wrapper(wrapper) = &result.ads[0].ad_type {
+            assert!(
+                wrapper.verifications.is_empty(),
+                "Wrapper without AdVerifications should have empty vec"
+            );
+        } else {
+            panic!("Expected Wrapper ad");
+        }
+    }
+
+    #[test]
+    fn test_parse_empty_ad_verifications() {
+        let xml = r#"<VAST version="4.1">
+  <Ad id="empty-v">
+    <InLine>
+      <AdSystem>Test</AdSystem>
+      <AdTitle>Empty Verifications</AdTitle>
+      <AdVerifications></AdVerifications>
+      <Creatives></Creatives>
+    </InLine>
+  </Ad>
+</VAST>"#;
+        let result = parse_vast(xml).unwrap();
+        if let VastAdType::InLine(inline) = &result.ads[0].ad_type {
+            assert!(
+                inline.verifications.is_empty(),
+                "Empty AdVerifications should produce empty vec"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_verification_without_optional_fields() {
+        let xml = r#"<VAST version="4.1">
+  <Ad id="minimal-v">
+    <InLine>
+      <AdSystem>Test</AdSystem>
+      <AdTitle>Minimal Verification</AdTitle>
+      <AdVerifications>
+        <Verification>
+          <JavaScriptResource>https://example.com/verify.js</JavaScriptResource>
+        </Verification>
+      </AdVerifications>
+      <Creatives></Creatives>
+    </InLine>
+  </Ad>
+</VAST>"#;
+        let result = parse_vast(xml).unwrap();
+        if let VastAdType::InLine(inline) = &result.ads[0].ad_type {
+            assert_eq!(inline.verifications.len(), 1);
+            let v = &inline.verifications[0];
+            assert!(v.vendor.is_none(), "vendor should be None when not set");
+            assert!(
+                v.api_framework.is_none(),
+                "apiFramework should be None when not set"
+            );
+            assert_eq!(
+                v.javascript_resource_url.as_deref(),
+                Some("https://example.com/verify.js")
+            );
+            assert!(v.parameters.is_none());
+            assert!(v.tracking_events.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_parse_verification_multiple_tracking_events() {
+        let xml = r#"<VAST version="4.1">
+  <Ad id="multi-track">
+    <InLine>
+      <AdSystem>Test</AdSystem>
+      <AdTitle>Multi Tracking</AdTitle>
+      <AdVerifications>
+        <Verification vendor="test-vendor" apiFramework="omid">
+          <JavaScriptResource>https://example.com/verify.js</JavaScriptResource>
+          <TrackingEvents>
+            <Tracking event="verificationNotExecuted">https://example.com/notExec</Tracking>
+            <Tracking event="loaded">https://example.com/loaded</Tracking>
+          </TrackingEvents>
+        </Verification>
+      </AdVerifications>
+      <Creatives></Creatives>
+    </InLine>
+  </Ad>
+</VAST>"#;
+        let result = parse_vast(xml).unwrap();
+        if let VastAdType::InLine(inline) = &result.ads[0].ad_type {
+            let v = &inline.verifications[0];
+            assert_eq!(v.tracking_events.len(), 2);
+            assert_eq!(v.tracking_events[0].event, "verificationNotExecuted");
+            assert_eq!(v.tracking_events[0].uri, "https://example.com/notExec");
+            assert_eq!(v.tracking_events[1].event, "loaded");
+            assert_eq!(v.tracking_events[1].uri, "https://example.com/loaded");
+        }
+    }
+
+    #[test]
+    fn test_parse_verification_cdata_in_parameters() {
+        let xml = r#"<VAST version="4.1">
+  <Ad id="cdata-params">
+    <InLine>
+      <AdSystem>Test</AdSystem>
+      <AdTitle>CDATA Params</AdTitle>
+      <AdVerifications>
+        <Verification vendor="dv" apiFramework="omid">
+          <JavaScriptResource>https://cdn.dv.com/script.js</JavaScriptResource>
+          <VerificationParameters><![CDATA[key1=val1&key2=val2&special=<>"']]></VerificationParameters>
+        </Verification>
+      </AdVerifications>
+      <Creatives></Creatives>
+    </InLine>
+  </Ad>
+</VAST>"#;
+        let result = parse_vast(xml).unwrap();
+        if let VastAdType::InLine(inline) = &result.ads[0].ad_type {
+            let v = &inline.verifications[0];
+            assert_eq!(
+                v.parameters.as_deref(),
+                Some("key1=val1&key2=val2&special=<>\"'")
+            );
+        }
     }
 }

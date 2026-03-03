@@ -1,4 +1,4 @@
-use crate::ad::vast::TrackingEvent;
+use crate::ad::vast::{TrackingEvent, Verification};
 use async_trait::async_trait;
 use tracing::info;
 
@@ -48,6 +48,8 @@ pub struct AdCreative {
     pub uri: String,
     /// Duration of the creative in seconds
     pub duration: f64,
+    /// OMID verification resources accumulated from VAST wrapper chain + InLine
+    pub verifications: Vec<Verification>,
 }
 
 /// Trait for ad content providers
@@ -126,6 +128,7 @@ pub trait AdProvider: Send + Sync {
             .map(|seg| AdCreative {
                 uri: seg.uri,
                 duration: seg.duration as f64,
+                verifications: Vec::new(),
             })
             .collect()
     }
@@ -237,6 +240,11 @@ impl AdProvider for StaticAdProvider {
 /// creative sources, producing visually distinct ads for customer demos.
 /// Uses the break index encoded in the segment name (`break-{idx}-seg-{idx}.ts`)
 /// to select the creative source.
+///
+/// Supports both MPEG-TS (HLS) and fMP4 (DASH) ad segments:
+/// - `.ts` segments → MPEG-TS from ritcher-demo creative sources
+/// - `.m4s` segments → fMP4 from DASH-IF CDN (Big Buck Bunny)
+/// - `-init.m4s` → fMP4 initialization segment from DASH-IF CDN
 #[derive(Clone, Debug)]
 pub struct DemoAdProvider {
     /// Ad source URLs indexed by break number (cycled if more breaks than sources)
@@ -245,6 +253,22 @@ pub struct DemoAdProvider {
     segment_duration: f32,
     /// Number of available segments per source (for cycling)
     segment_count: usize,
+}
+
+/// DASH-IF CDN base URL for fMP4 ad segments (Big Buck Bunny)
+const DASH_AD_BASE: &str = "https://dash.akamaized.net/akamai/bbb_30fps";
+/// DASH-IF video representation used for ad segments
+const DASH_AD_VIDEO_REP: &str = "bbb_30fps_640x360_800k";
+/// DASH-IF audio representation used for ad segments
+const DASH_AD_AUDIO_REP: &str = "bbb_a64k";
+/// Starting segment number for ad content (offset from content to avoid overlap)
+const DASH_AD_START_SEGMENT: usize = 100;
+
+/// Track type parsed from segment name prefix (v=video, a=audio)
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum TrackType {
+    Video,
+    Audio,
 }
 
 impl DemoAdProvider {
@@ -268,8 +292,8 @@ impl DemoAdProvider {
         }
     }
 
-    /// Parse break index and segment index from ad name like "break-2-seg-5.ts"
-    fn parse_ad_name(ad_name: &str) -> Option<(usize, usize)> {
+    /// Parse HLS segment name like "break-2-seg-5.ts" → (break=2, seg=5)
+    fn parse_hls_name(ad_name: &str) -> Option<(usize, usize)> {
         let name = ad_name.strip_suffix(".ts").unwrap_or(ad_name);
         let parts: Vec<&str> = name.split('-').collect();
 
@@ -280,6 +304,73 @@ impl DemoAdProvider {
             Some((break_idx, seg_idx))
         } else {
             None
+        }
+    }
+
+    /// Parse DASH track-specific init name like "break-2-vinit.m4s" or "break-2-ainit.m4s"
+    fn parse_dash_init(ad_name: &str) -> Option<(usize, TrackType)> {
+        let name = ad_name.strip_suffix(".m4s")?;
+        let parts: Vec<&str> = name.split('-').collect();
+
+        // Expected format: ["break", "2", "vinit"] or ["break", "2", "ainit"]
+        if parts.len() >= 3 && parts[0] == "break" {
+            let break_idx = parts[1].parse().ok()?;
+            match parts[2] {
+                "vinit" => Some((break_idx, TrackType::Video)),
+                "ainit" => Some((break_idx, TrackType::Audio)),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Parse DASH track-specific segment name like "break-2-vseg-5.m4s" or "break-2-aseg-5.m4s"
+    fn parse_dash_segment(ad_name: &str) -> Option<(usize, usize, TrackType)> {
+        let name = ad_name.strip_suffix(".m4s")?;
+        let parts: Vec<&str> = name.split('-').collect();
+
+        // Expected format: ["break", "2", "vseg", "5"] or ["break", "2", "aseg", "5"]
+        if parts.len() >= 4 && parts[0] == "break" {
+            let break_idx = parts[1].parse().ok()?;
+            let seg_idx = parts[3].parse().ok()?;
+            let track_type = match parts[2] {
+                "vseg" => TrackType::Video,
+                "aseg" => TrackType::Audio,
+                _ => return None,
+            };
+            Some((break_idx, seg_idx, track_type))
+        } else {
+            None
+        }
+    }
+
+    /// Resolve a DASH fMP4 segment URL from DASH-IF CDN (video or audio)
+    fn resolve_dash_segment(break_idx: usize, seg_idx: usize, track: TrackType) -> String {
+        let seg_num = DASH_AD_START_SEGMENT + (break_idx * 10) + seg_idx;
+        match track {
+            TrackType::Video => format!(
+                "{}/{}/{}_{}.m4v",
+                DASH_AD_BASE, DASH_AD_VIDEO_REP, DASH_AD_VIDEO_REP, seg_num
+            ),
+            TrackType::Audio => format!(
+                "{}/{}/{}_{}.m4a",
+                DASH_AD_BASE, DASH_AD_AUDIO_REP, DASH_AD_AUDIO_REP, seg_num
+            ),
+        }
+    }
+
+    /// Resolve a DASH fMP4 initialization segment URL from DASH-IF CDN (video or audio)
+    fn resolve_dash_init(track: TrackType) -> String {
+        match track {
+            TrackType::Video => format!(
+                "{}/{}/{}_0.m4v",
+                DASH_AD_BASE, DASH_AD_VIDEO_REP, DASH_AD_VIDEO_REP
+            ),
+            TrackType::Audio => format!(
+                "{}/{}/{}_0.m4a",
+                DASH_AD_BASE, DASH_AD_AUDIO_REP, DASH_AD_AUDIO_REP
+            ),
         }
     }
 }
@@ -313,7 +404,26 @@ impl AdProvider for DemoAdProvider {
     }
 
     fn resolve_segment_url(&self, ad_name: &str, _session_id: &str) -> Option<String> {
-        let (break_idx, seg_idx) = Self::parse_ad_name(ad_name)?;
+        // DASH fMP4 init segment: "break-N-vinit.m4s" or "break-N-ainit.m4s"
+        if let Some((break_idx, track)) = Self::parse_dash_init(ad_name) {
+            info!(
+                "DemoAdProvider: DASH {:?} init segment for break {}",
+                track, break_idx
+            );
+            return Some(Self::resolve_dash_init(track));
+        }
+
+        // DASH fMP4 data segment: "break-N-vseg-M.m4s" or "break-N-aseg-M.m4s"
+        if let Some((break_idx, seg_idx, track)) = Self::parse_dash_segment(ad_name) {
+            info!(
+                "DemoAdProvider: DASH {:?} break {} seg {} → CDN segment",
+                track, break_idx, seg_idx
+            );
+            return Some(Self::resolve_dash_segment(break_idx, seg_idx, track));
+        }
+
+        // HLS MPEG-TS segment: "break-N-seg-M.ts"
+        let (break_idx, seg_idx) = Self::parse_hls_name(ad_name)?;
 
         // Select creative source based on break index (cycling through 5 creatives)
         let source = &self.creative_sources[break_idx % self.creative_sources.len()];
@@ -418,21 +528,51 @@ mod tests {
     // === DemoAdProvider tests ===
 
     #[test]
-    fn test_demo_parse_ad_name() {
+    fn test_demo_parse_hls_name() {
         assert_eq!(
-            DemoAdProvider::parse_ad_name("break-0-seg-0.ts"),
+            DemoAdProvider::parse_hls_name("break-0-seg-0.ts"),
             Some((0, 0))
         );
         assert_eq!(
-            DemoAdProvider::parse_ad_name("break-2-seg-5.ts"),
+            DemoAdProvider::parse_hls_name("break-2-seg-5.ts"),
             Some((2, 5))
         );
         assert_eq!(
-            DemoAdProvider::parse_ad_name("break-4-seg-15.ts"),
+            DemoAdProvider::parse_hls_name("break-4-seg-15.ts"),
             Some((4, 15))
         );
-        assert_eq!(DemoAdProvider::parse_ad_name("invalid.ts"), None);
-        assert_eq!(DemoAdProvider::parse_ad_name("break-0.ts"), None);
+        assert_eq!(DemoAdProvider::parse_hls_name("invalid.ts"), None);
+        assert_eq!(DemoAdProvider::parse_hls_name("break-0.ts"), None);
+    }
+
+    #[test]
+    fn test_demo_parse_dash_init() {
+        assert_eq!(
+            DemoAdProvider::parse_dash_init("break-0-vinit.m4s"),
+            Some((0, TrackType::Video))
+        );
+        assert_eq!(
+            DemoAdProvider::parse_dash_init("break-2-ainit.m4s"),
+            Some((2, TrackType::Audio))
+        );
+        assert_eq!(DemoAdProvider::parse_dash_init("break-0-init.m4s"), None);
+        assert_eq!(DemoAdProvider::parse_dash_init("break-0-vinit.ts"), None);
+    }
+
+    #[test]
+    fn test_demo_parse_dash_segment() {
+        assert_eq!(
+            DemoAdProvider::parse_dash_segment("break-0-vseg-3.m4s"),
+            Some((0, 3, TrackType::Video))
+        );
+        assert_eq!(
+            DemoAdProvider::parse_dash_segment("break-1-aseg-5.m4s"),
+            Some((1, 5, TrackType::Audio))
+        );
+        assert_eq!(
+            DemoAdProvider::parse_dash_segment("break-0-seg-3.m4s"),
+            None
+        );
     }
 
     #[test]
@@ -490,6 +630,111 @@ mod tests {
             provider.resolve_segment_url("break-0-seg-15.ts", "test"),
             Some("http://localhost:3333/ads/creative-1/out_005.ts".to_string())
         );
+    }
+
+    // === DASH fMP4 tests ===
+
+    #[test]
+    fn test_demo_ad_provider_dash_video_init() {
+        let provider = DemoAdProvider::new("http://localhost:3333/ads");
+
+        let url = provider
+            .resolve_segment_url("break-0-vinit.m4s", "test")
+            .unwrap();
+        assert!(
+            url.contains("dash.akamaized.net"),
+            "Init should come from DASH-IF CDN"
+        );
+        assert!(url.ends_with("_0.m4v"), "Video init should be _0.m4v");
+        assert!(
+            url.contains("bbb_30fps_640x360_800k"),
+            "Should use video rep"
+        );
+    }
+
+    #[test]
+    fn test_demo_ad_provider_dash_audio_init() {
+        let provider = DemoAdProvider::new("http://localhost:3333/ads");
+
+        let url = provider
+            .resolve_segment_url("break-0-ainit.m4s", "test")
+            .unwrap();
+        assert!(
+            url.contains("dash.akamaized.net"),
+            "Init should come from DASH-IF CDN"
+        );
+        assert!(url.ends_with("_0.m4a"), "Audio init should be _0.m4a");
+        assert!(url.contains("bbb_a64k"), "Should use audio rep");
+    }
+
+    #[test]
+    fn test_demo_ad_provider_dash_video_segment() {
+        let provider = DemoAdProvider::new("http://localhost:3333/ads");
+
+        let url = provider
+            .resolve_segment_url("break-0-vseg-0.m4s", "test")
+            .unwrap();
+        assert!(url.contains(".m4v"), "Video segment should be .m4v");
+        assert!(
+            url.contains("_100.m4v"),
+            "Expected video segment 100, got: {}",
+            url
+        );
+    }
+
+    #[test]
+    fn test_demo_ad_provider_dash_audio_segment() {
+        let provider = DemoAdProvider::new("http://localhost:3333/ads");
+
+        let url = provider
+            .resolve_segment_url("break-0-aseg-0.m4s", "test")
+            .unwrap();
+        assert!(url.contains(".m4a"), "Audio segment should be .m4a");
+        assert!(
+            url.contains("_100.m4a"),
+            "Expected audio segment 100, got: {}",
+            url
+        );
+    }
+
+    #[test]
+    fn test_demo_ad_provider_dash_different_breaks_use_different_segments() {
+        let provider = DemoAdProvider::new("http://localhost:3333/ads");
+
+        let url0 = provider
+            .resolve_segment_url("break-0-vseg-0.m4s", "test")
+            .unwrap();
+        let url1 = provider
+            .resolve_segment_url("break-1-vseg-0.m4s", "test")
+            .unwrap();
+        let url2 = provider
+            .resolve_segment_url("break-2-vseg-0.m4s", "test")
+            .unwrap();
+
+        // Each break should use different segment ranges
+        assert_ne!(url0, url1);
+        assert_ne!(url1, url2);
+        // Break 0 → 100, Break 1 → 110, Break 2 → 120
+        assert!(url0.contains("_100.m4v"));
+        assert!(url1.contains("_110.m4v"));
+        assert!(url2.contains("_120.m4v"));
+    }
+
+    #[test]
+    fn test_demo_ad_provider_dash_video_audio_init_differ() {
+        let provider = DemoAdProvider::new("http://localhost:3333/ads");
+
+        let vinit = provider
+            .resolve_segment_url("break-0-vinit.m4s", "test")
+            .unwrap();
+        let ainit = provider
+            .resolve_segment_url("break-0-ainit.m4s", "test")
+            .unwrap();
+
+        // Video and audio init segments must be different
+        assert_ne!(vinit, ainit);
+        assert!(vinit.contains(".m4v"));
+        assert!(ainit.contains(".m4a"));
     }
 
     #[tokio::test]
