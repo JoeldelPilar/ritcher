@@ -89,7 +89,7 @@ pub fn validate_origin_url(url: &str) -> Result<(), RitcherError> {
 /// - `203.0.113.0/24`  — TEST-NET-3 (RFC 5737)
 /// - `240.0.0.0/4`     — reserved / Class E (RFC 1112)
 /// - `255.255.255.255`  — broadcast
-fn is_blocked_ipv4(ip: Ipv4Addr) -> bool {
+pub(crate) fn is_blocked_ipv4(ip: Ipv4Addr) -> bool {
     let o = ip.octets();
     let (a, b, c) = (o[0], o[1], o[2]);
 
@@ -119,7 +119,7 @@ fn is_blocked_ipv4(ip: Ipv4Addr) -> bool {
 ///
 /// IPv4-mapped/compatible/NAT64 addresses are handled separately via
 /// [`extract_embedded_ipv4`].
-fn is_blocked_ipv6(ip: Ipv6Addr) -> bool {
+pub(crate) fn is_blocked_ipv6(ip: Ipv6Addr) -> bool {
     let s = ip.segments();
 
     ip.is_unspecified()                  // ::
@@ -137,7 +137,7 @@ fn is_blocked_ipv6(ip: Ipv6Addr) -> bool {
 /// - `::x.x.x.x`      — IPv4-compatible (deprecated, RFC 4291)
 /// - `64:ff9b::/96`    — NAT64 well-known prefix (RFC 6052)
 /// - `64:ff9b:1::/48`  — NAT64 local-use prefix (RFC 8215)
-fn extract_embedded_ipv4(ip: Ipv6Addr) -> Option<Ipv4Addr> {
+pub(crate) fn extract_embedded_ipv4(ip: Ipv6Addr) -> Option<Ipv4Addr> {
     let segs = ip.segments();
     let bytes = ip.octets();
 

@@ -2,13 +2,16 @@ use crate::{
     ad::{AdProvider, DemoAdProvider, SlateProvider, StaticAdProvider, VastAdProvider},
     cache::ManifestCache,
     config::{AdProviderType, Config, SessionStoreType},
-    server::rate_limit::RateLimiter,
+    server::{
+        dns_resolver::SsrfSafeResolver, rate_limit::RateLimiter,
+        url_validation::validate_origin_url,
+    },
     session::SessionManager,
 };
-use reqwest::Client;
+use reqwest::{Client, redirect};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tracing::info;
+use tracing::{info, warn};
 
 /// Application state shared across all handlers
 #[derive(Clone)]
@@ -32,13 +35,52 @@ pub struct AppState {
 impl AppState {
     /// Create a new AppState with the given configuration
     pub async fn new(config: Config) -> Self {
-        let http_client = Client::builder()
+        // Custom redirect policy: re-validate each redirect target against
+        // SSRF rules. Without this, an attacker can point an origin URL at a
+        // public host that 3xx-redirects to a private/internal IP, bypassing
+        // the initial validate_origin_url() check.
+        let ssrf_safe_redirect = redirect::Policy::custom(|attempt| {
+            // Cap total redirects at 10 (same as reqwest default)
+            if attempt.previous().len() >= 10 {
+                attempt.error(std::io::Error::other("too many redirects"))
+            } else {
+                let target = attempt.url().to_string();
+                match validate_origin_url(&target) {
+                    Ok(()) => attempt.follow(),
+                    Err(_) => {
+                        warn!(
+                            "SSRF: blocked redirect to {} (from {:?})",
+                            target,
+                            attempt.previous().last()
+                        );
+                        attempt.error(std::io::Error::other(format!(
+                            "SSRF: redirect to blocked address {}",
+                            target
+                        )))
+                    }
+                }
+            }
+        });
+
+        let builder = Client::builder()
+            .redirect(ssrf_safe_redirect)
             .timeout(Duration::from_secs(30))
             .connect_timeout(Duration::from_secs(5))
             .pool_idle_timeout(Duration::from_secs(90))
-            .pool_max_idle_per_host(10)
-            .build()
-            .expect("Failed to create HTTP client");
+            .pool_max_idle_per_host(10);
+
+        // In production, use SSRF-safe DNS resolver to prevent DNS rebinding
+        // attacks. In dev mode, wiremock binds to 127.0.0.1 which the resolver
+        // would block, so we skip it.
+        let builder = if !config.is_dev {
+            info!("DNS rebinding protection: enabled (SSRF-safe resolver)");
+            builder.dns_resolver(Arc::new(SsrfSafeResolver::new()))
+        } else {
+            info!("DNS rebinding protection: disabled (dev mode)");
+            builder
+        };
+
+        let http_client = builder.build().expect("Failed to create HTTP client");
 
         let ttl = Duration::from_secs(config.session_ttl_secs);
         let sessions = match config.session_store {

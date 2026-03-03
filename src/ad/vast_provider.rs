@@ -1,7 +1,7 @@
 use crate::ad::conditioning;
 use crate::ad::provider::{AdCreative, AdProvider, AdSegment, AdTrackingInfo, ResolvedSegment};
 use crate::ad::slate::SlateProvider;
-use crate::ad::vast::{self, TrackingEvent, VastAdType};
+use crate::ad::vast::{self, TrackingEvent, VastAdType, Verification};
 use crate::http_retry::{RetryConfig, fetch_with_retry};
 use crate::metrics;
 use async_trait::async_trait;
@@ -26,6 +26,8 @@ struct ResolvedVastCreative {
     tracking_events: Vec<TrackingEvent>,
     /// Error URL
     error_url: Option<String>,
+    /// OMID verification resources accumulated from wrapper chain + InLine
+    verifications: Vec<Verification>,
 }
 
 /// Ad creative cached per session with tracking state
@@ -119,7 +121,7 @@ impl VastAdProvider {
 
     /// Fetch and parse VAST XML, following wrapper chains
     ///
-    /// Accumulates wrapper tracking data through the chain.
+    /// Accumulates wrapper tracking data and verification nodes through the chain.
     /// Uses [`fetch_with_retry`] for fault-tolerant HTTP fetching.
     ///
     /// Parameters use owned types (`String`, `Vec<T>`) instead of references
@@ -132,6 +134,7 @@ impl VastAdProvider {
         session_id: String,
         wrapper_impressions: Vec<String>,
         wrapper_tracking: Vec<TrackingEvent>,
+        wrapper_verifications: Vec<Verification>,
     ) -> Option<Vec<ResolvedVastCreative>> {
         if depth > self.max_wrapper_depth {
             warn!(
@@ -189,6 +192,11 @@ impl VastAdProvider {
                             let mut tracking_events = wrapper_tracking.clone();
                             tracking_events.extend(linear.tracking_events.clone());
 
+                            // Merge wrapper verifications with inline verifications
+                            // IAB spec: all Verification nodes from all wrapper levels must survive
+                            let mut verifications = wrapper_verifications.clone();
+                            verifications.extend(inline.verifications.clone());
+
                             creatives.push(ResolvedVastCreative {
                                 url: media_file.url.clone(),
                                 duration: linear.duration,
@@ -196,17 +204,21 @@ impl VastAdProvider {
                                 impression_urls,
                                 tracking_events,
                                 error_url: inline.error_url.clone(),
+                                verifications,
                             });
                         }
                     }
                 }
                 VastAdType::Wrapper(wrapper) => {
-                    // Accumulate wrapper tracking and follow chain
+                    // Accumulate wrapper tracking, verifications and follow chain
                     let mut merged_impressions = wrapper_impressions.clone();
                     merged_impressions.extend(wrapper.impression_urls.clone());
 
                     let mut merged_tracking = wrapper_tracking.clone();
                     merged_tracking.extend(wrapper.tracking_events.clone());
+
+                    let mut merged_verifications = wrapper_verifications.clone();
+                    merged_verifications.extend(wrapper.verifications.clone());
 
                     // Box::pin is required for recursive async functions to avoid
                     // infinite future size at compile time
@@ -216,6 +228,7 @@ impl VastAdProvider {
                         session_id.clone(),
                         merged_impressions,
                         merged_tracking,
+                        merged_verifications,
                     ))
                     .await
                     {
@@ -276,7 +289,7 @@ impl AdProvider for VastAdProvider {
         );
 
         let creatives = match self
-            .fetch_vast(url, 0, session_id.to_string(), vec![], vec![])
+            .fetch_vast(url, 0, session_id.to_string(), vec![], vec![], vec![])
             .await
         {
             Some(c) if !c.is_empty() => {
@@ -402,7 +415,7 @@ impl AdProvider for VastAdProvider {
         );
 
         match self
-            .fetch_vast(url, 0, session_id.to_string(), vec![], vec![])
+            .fetch_vast(url, 0, session_id.to_string(), vec![], vec![], vec![])
             .await
         {
             Some(creatives) if !creatives.is_empty() => {
@@ -412,6 +425,7 @@ impl AdProvider for VastAdProvider {
                     .map(|c| AdCreative {
                         uri: c.url,
                         duration: c.duration as f64,
+                        verifications: c.verifications,
                     })
                     .collect()
             }
@@ -881,7 +895,7 @@ mod tests {
     fn test_wrapper_tracking_merge() {
         // Verifies that wrapper impression URLs and tracking events
         // are correctly accumulated and merged with inline ad data.
-        // This tests the merge pattern used in fetch_vast() lines 204-209 and 224-228.
+        // This tests the merge pattern used in fetch_vast().
 
         // Simulate wrapper accumulation
         let mut wrapper_impressions = vec!["http://wrapper/imp".to_string()];
@@ -914,5 +928,198 @@ mod tests {
         assert_eq!(level2_impressions[0], "http://wrapper2/imp");
         assert_eq!(level2_impressions[1], "http://wrapper/imp");
         assert_eq!(level2_impressions[2], "http://inline/imp");
+    }
+
+    #[test]
+    fn test_wrapper_verification_accumulation() {
+        use crate::ad::vast::Verification;
+
+        // Simulate wrapper chain verification accumulation (same pattern as fetch_vast)
+        // Level 1 wrapper has one verification
+        let wrapper_verifications = vec![Verification {
+            vendor: Some("wrapper-vendor".to_string()),
+            javascript_resource_url: Some("https://wrapper.example.com/omid.js".to_string()),
+            api_framework: Some("omid".to_string()),
+            parameters: None,
+            tracking_events: vec![],
+        }];
+
+        // InLine ad has its own verification
+        let inline_verifications = vec![Verification {
+            vendor: Some("inline-vendor".to_string()),
+            javascript_resource_url: Some("https://inline.example.com/omid.js".to_string()),
+            api_framework: Some("omid".to_string()),
+            parameters: Some("ctx=abc".to_string()),
+            tracking_events: vec![],
+        }];
+
+        // Merge: wrapper first, then inline (IAB spec: all must survive)
+        let mut merged = wrapper_verifications;
+        merged.extend(inline_verifications);
+
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].vendor.as_deref(), Some("wrapper-vendor"));
+        assert_eq!(merged[1].vendor.as_deref(), Some("inline-vendor"));
+        assert_eq!(merged[1].parameters.as_deref(), Some("ctx=abc"));
+    }
+
+    #[test]
+    fn test_multi_level_wrapper_verification_accumulation() {
+        use crate::ad::vast::Verification;
+
+        // Level 2 wrapper
+        let level2 = vec![Verification {
+            vendor: Some("level2-vendor".to_string()),
+            javascript_resource_url: Some("https://l2.example.com/omid.js".to_string()),
+            api_framework: Some("omid".to_string()),
+            parameters: None,
+            tracking_events: vec![],
+        }];
+
+        // Level 1 wrapper adds its own
+        let level1 = vec![Verification {
+            vendor: Some("level1-vendor".to_string()),
+            javascript_resource_url: Some("https://l1.example.com/omid.js".to_string()),
+            api_framework: Some("omid".to_string()),
+            parameters: None,
+            tracking_events: vec![],
+        }];
+
+        // InLine adds its own
+        let inline = vec![Verification {
+            vendor: Some("inline-vendor".to_string()),
+            javascript_resource_url: Some("https://inline.example.com/omid.js".to_string()),
+            api_framework: Some("omid".to_string()),
+            parameters: None,
+            tracking_events: vec![],
+        }];
+
+        // Simulate the accumulation through wrapper chain
+        let mut acc = level2;
+        acc.extend(level1);
+        acc.extend(inline);
+
+        assert_eq!(
+            acc.len(),
+            3,
+            "All verification nodes from all levels must survive"
+        );
+        assert_eq!(acc[0].vendor.as_deref(), Some("level2-vendor"));
+        assert_eq!(acc[1].vendor.as_deref(), Some("level1-vendor"));
+        assert_eq!(acc[2].vendor.as_deref(), Some("inline-vendor"));
+    }
+
+    #[tokio::test]
+    async fn get_ad_creatives_includes_verifications() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        const VAST_WITH_OMID: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<VAST version="4.1">
+  <Ad id="omid-ad">
+    <InLine>
+      <AdSystem>TestAds</AdSystem>
+      <AdTitle>OMID Ad</AdTitle>
+      <Impression>http://impression.example.com/track</Impression>
+      <AdVerifications>
+        <Verification vendor="doubleverify.com-omid" apiFramework="omid">
+          <JavaScriptResource>https://cdn.dv.com/dvtp_src.js</JavaScriptResource>
+          <VerificationParameters>ctx=123</VerificationParameters>
+        </Verification>
+      </AdVerifications>
+      <Creatives>
+        <Creative id="c1">
+          <Linear>
+            <Duration>00:00:15</Duration>
+            <MediaFiles>
+              <MediaFile delivery="streaming" type="application/x-mpegURL" width="1280" height="720">
+                http://ad.example.com/ad.m3u8
+              </MediaFile>
+            </MediaFiles>
+          </Linear>
+        </Creative>
+      </Creatives>
+    </InLine>
+  </Ad>
+</VAST>"#;
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(VAST_WITH_OMID))
+            .mount(&server)
+            .await;
+
+        let client = Client::new();
+        let provider = VastAdProvider::new(server.uri(), client);
+
+        let creatives = provider.get_ad_creatives(30.0, "session-omid").await;
+
+        assert!(!creatives.is_empty(), "Should return creatives");
+        assert_eq!(
+            creatives[0].verifications.len(),
+            1,
+            "Creative should carry verification data"
+        );
+        assert_eq!(
+            creatives[0].verifications[0].vendor.as_deref(),
+            Some("doubleverify.com-omid")
+        );
+        assert_eq!(
+            creatives[0].verifications[0]
+                .javascript_resource_url
+                .as_deref(),
+            Some("https://cdn.dv.com/dvtp_src.js")
+        );
+        assert_eq!(
+            creatives[0].verifications[0].parameters.as_deref(),
+            Some("ctx=123")
+        );
+    }
+
+    #[tokio::test]
+    async fn get_ad_creatives_without_verifications() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // Standard VAST without <AdVerifications>
+        const VAST_NO_OMID: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<VAST version="3.0">
+  <Ad id="ad-001">
+    <InLine>
+      <AdSystem>TestAds</AdSystem>
+      <AdTitle>Test Ad</AdTitle>
+      <Impression>http://impression.example.com/track</Impression>
+      <Creatives>
+        <Creative id="c1">
+          <Linear>
+            <Duration>00:00:15</Duration>
+            <MediaFiles>
+              <MediaFile delivery="streaming" type="application/x-mpegURL" width="1280" height="720">
+                http://ad.example.com/ad.m3u8
+              </MediaFile>
+            </MediaFiles>
+          </Linear>
+        </Creative>
+      </Creatives>
+    </InLine>
+  </Ad>
+</VAST>"#;
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(VAST_NO_OMID))
+            .mount(&server)
+            .await;
+
+        let client = Client::new();
+        let provider = VastAdProvider::new(server.uri(), client);
+
+        let creatives = provider.get_ad_creatives(30.0, "session-no-omid").await;
+
+        assert!(!creatives.is_empty());
+        assert!(
+            creatives[0].verifications.is_empty(),
+            "No verifications when VAST has no AdVerifications"
+        );
     }
 }

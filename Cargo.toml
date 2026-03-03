@@ -30,6 +30,7 @@ metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
 chrono = "0.4"
 redis = { version = "0.29", features = ["tokio-comp", "connection-manager"], optional = true }
+hickory-resolver = "0.25"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
