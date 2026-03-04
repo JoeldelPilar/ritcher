@@ -41,6 +41,8 @@ pub fn set_active_sessions(count: usize) {
 
 /// Record detected ad breaks
 pub fn record_ad_breaks(count: usize) {
+    // usize-to-u64: safe on all supported platforms (usize <= u64).
+    #[allow(clippy::cast_possible_truncation)]
     counter!(AD_BREAKS_DETECTED).increment(count as u64);
 }
 
@@ -72,6 +74,8 @@ pub const ASSET_LIST_REQUESTS: &str = "ritcher_asset_list_requests_total";
 
 /// Record injected interstitial markers
 pub fn record_interstitials(count: usize) {
+    // usize-to-u64: safe on all supported platforms (usize <= u64).
+    #[allow(clippy::cast_possible_truncation)]
     counter!(INTERSTITIALS_INJECTED).increment(count as u64);
 }
 

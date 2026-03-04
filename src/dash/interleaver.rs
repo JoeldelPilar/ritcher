@@ -130,6 +130,9 @@ fn create_ad_period(
     let total_duration: f64 = ad_segments.iter().map(|s| s.duration as f64).sum();
 
     // Segment duration in timescale units (timescale=1 → 1 unit = 1 second)
+    // Segment duration is a positive f32 representing seconds; truncation to u64
+    // is intentional for DASH timescale=1 SegmentList duration.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let seg_duration = ad_segments.first().map(|s| s.duration as u64).unwrap_or(1);
 
     // Mirror content AdaptationSets, or fall back to single video

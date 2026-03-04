@@ -158,6 +158,9 @@ impl SessionManager {
             Backend::Valkey { conn, key_prefix } => {
                 let key = format!("{}:{}", key_prefix, session_id);
                 let mut conn = conn.clone();
+                // Session TTL is configured in seconds (default 300); u64->i64 is safe
+                // for any realistic TTL value (max ~292 billion years).
+                #[allow(clippy::cast_possible_truncation)]
                 let ttl_secs = self.ttl.as_secs() as i64;
                 // Use EXPIRE to refresh TTL in a single O(1) command instead of
                 // GET → deserialize → modify → serialize → SET.

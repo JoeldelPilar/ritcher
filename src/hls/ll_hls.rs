@@ -230,9 +230,8 @@ pub fn extract_quoted_uri(line: &str) -> Option<(String, usize, usize)> {
 
 /// Rewrite the URI in a PART or PRELOAD-HINT tag to the segment proxy.
 fn rewrite_segment_uri(line: &str, session_id: &str, base_url: &str, origin_base: &str) -> String {
-    let (uri_value, quote_start, quote_end) = match extract_quoted_uri(line) {
-        Some(v) => v,
-        None => return line.to_string(),
+    let Some((uri_value, quote_start, quote_end)) = extract_quoted_uri(line) else {
+        return line.to_string();
     };
 
     let (segment_name, origin) =
@@ -261,9 +260,8 @@ fn rewrite_segment_uri(line: &str, session_id: &str, base_url: &str, origin_base
 
 /// Rewrite the URI in a RENDITION-REPORT tag to the playlist proxy.
 fn rewrite_playlist_uri(line: &str, session_id: &str, base_url: &str, origin_base: &str) -> String {
-    let (uri_value, quote_start, quote_end) = match extract_quoted_uri(line) {
-        Some(v) => v,
-        None => return line.to_string(),
+    let Some((uri_value, quote_start, quote_end)) = extract_quoted_uri(line) else {
+        return line.to_string();
     };
 
     let absolute_url = if uri_value.starts_with("http://") || uri_value.starts_with("https://") {

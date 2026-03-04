@@ -1,4 +1,5 @@
 use std::env;
+use tracing::warn;
 
 /// HLS stitching mode
 #[derive(Clone, Debug, PartialEq)]
@@ -28,37 +29,48 @@ pub enum AdProviderType {
     Demo,
 }
 
-/// Application configuration loaded from environment variables
+/// Application configuration loaded from environment variables.
+///
+/// In `DEV_MODE=true`, most fields have sensible defaults. In production,
+/// `PORT`, `BASE_URL`, and `ORIGIN_URL` are required.
 #[derive(Clone, Debug)]
 pub struct Config {
+    /// TCP port the HTTP server binds to (`PORT`, default: 3000 in dev)
     pub port: u16,
+    /// Public URL of this stitcher instance (`BASE_URL`)
     pub base_url: String,
+    /// Default origin playlist/manifest URL (`ORIGIN_URL`)
     pub origin_url: String,
+    /// Whether development mode is active (`DEV_MODE`)
     pub is_dev: bool,
-    /// HLS stitching mode: ssai (default) or sgai
+    /// HLS stitching mode: ssai (default) or sgai (`STITCHING_MODE`)
     pub stitching_mode: StitchingMode,
-    /// Ad provider type selection
+    /// Ad provider type selection (`AD_PROVIDER_TYPE`: auto, vast, static, demo)
     pub ad_provider_type: AdProviderType,
-    /// Static ad source URL (used when ad_provider_type = Static)
+    /// Static ad source URL (`AD_SOURCE_URL`, used when ad_provider_type = Static)
     pub ad_source_url: String,
-    /// Static ad segment duration (used when ad_provider_type = Static)
+    /// Static ad segment duration in seconds (`AD_SEGMENT_DURATION`, default: 1.0)
     pub ad_segment_duration: f32,
-    /// VAST endpoint URL (used when ad_provider_type = Vast)
+    /// VAST ad server endpoint URL (`VAST_ENDPOINT`)
     pub vast_endpoint: Option<String>,
-    /// Slate URL for fallback content when no ads are available
+    /// Slate URL for fallback content when no ads are available (`SLATE_URL`)
     pub slate_url: Option<String>,
-    /// Slate segment duration in seconds (default: 1.0)
+    /// Slate segment duration in seconds (`SLATE_SEGMENT_DURATION`, default: 1.0)
     pub slate_segment_duration: f32,
-    /// Session store backend
+    /// Session store backend (`SESSION_STORE`: memory or valkey)
     pub session_store: SessionStoreType,
-    /// Valkey/Redis URL (used when session_store = Valkey)
+    /// Valkey/Redis connection URL (`VALKEY_URL`)
     pub valkey_url: Option<String>,
-    /// Session TTL in seconds (default: 300)
+    /// Session TTL in seconds (`SESSION_TTL_SECS`, default: 300)
     pub session_ttl_secs: u64,
-    /// Rate limit: max requests per minute per IP (0 = disabled)
+    /// Max requests per minute per IP, 0 = disabled (`RATE_LIMIT_RPM`)
     pub rate_limit_rpm: u32,
-    /// Base URL for demo ad creatives (used when ad_provider_type = Demo)
+    /// Base URL for demo ad creatives (`DEMO_AD_BASE_URL`)
     pub demo_ad_base_url: Option<String>,
+    /// Origin HTTP request timeout in seconds (`ORIGIN_TIMEOUT_SECS`, default: 30)
+    pub origin_timeout_secs: u64,
+    /// Manifest cache TTL in milliseconds (`MANIFEST_CACHE_TTL_MS`, default: 2000)
+    pub manifest_cache_ttl_ms: u64,
 }
 
 impl Config {
@@ -113,11 +125,10 @@ impl Config {
         let demo_ad_base_url = env::var("DEMO_AD_BASE_URL").ok();
 
         // Ad provider type: auto-detect from VAST_ENDPOINT or explicit AD_PROVIDER_TYPE
-        let ad_provider_type = match env::var("AD_PROVIDER_TYPE")
+        let ad_provider_type_raw = env::var("AD_PROVIDER_TYPE")
             .unwrap_or_else(|_| "auto".to_string())
-            .to_lowercase()
-            .as_str()
-        {
+            .to_lowercase();
+        let ad_provider_type = match ad_provider_type_raw.as_str() {
             "vast" => AdProviderType::Vast,
             "static" => AdProviderType::Static,
             "demo" => AdProviderType::Demo,
@@ -169,6 +180,27 @@ impl Config {
             .parse()
             .unwrap_or(0);
 
+        let origin_timeout_secs: u64 = env::var("ORIGIN_TIMEOUT_SECS")
+            .unwrap_or_else(|_| "30".to_string())
+            .parse()
+            .unwrap_or(30);
+
+        let manifest_cache_ttl_ms: u64 = env::var("MANIFEST_CACHE_TTL_MS")
+            .unwrap_or_else(|_| "2000".to_string())
+            .parse()
+            .unwrap_or(2000);
+
+        // Emit warnings for important silent fallbacks in production mode
+        if !is_dev {
+            if rate_limit_rpm == 0 {
+                warn!("Rate limiting is disabled (RATE_LIMIT_RPM is 0 or unset)");
+            }
+
+            if vast_endpoint.is_none() && matches!(ad_provider_type_raw.as_str(), "auto" | "vast") {
+                warn!("No VAST endpoint configured, falling back to static ads");
+            }
+        }
+
         Ok(Config {
             port,
             base_url,
@@ -186,6 +218,8 @@ impl Config {
             session_ttl_secs,
             rate_limit_rpm,
             demo_ad_base_url,
+            origin_timeout_secs,
+            manifest_cache_ttl_ms,
         })
     }
 }
@@ -401,6 +435,84 @@ mod tests {
             || {
                 let config = Config::from_env().unwrap();
                 assert_eq!(config.ad_segment_duration, 2.5);
+            },
+        );
+    }
+
+    #[test]
+    fn rate_limit_disabled_defaults_to_zero() {
+        // When RATE_LIMIT_RPM is unset, rate_limit_rpm == 0 (disabled).
+        // In prod mode this emits a tracing::warn! for operator visibility.
+        with_env(
+            &[
+                ("PORT", "8080"),
+                ("BASE_URL", "https://example.com"),
+                ("ORIGIN_URL", "https://example.com"),
+            ],
+            &["DEV_MODE", "RATE_LIMIT_RPM"],
+            || {
+                let config = Config::from_env().unwrap();
+                assert_eq!(config.rate_limit_rpm, 0);
+            },
+        );
+    }
+
+    #[test]
+    fn vast_fallback_to_static_when_no_endpoint() {
+        // When AD_PROVIDER_TYPE is "auto" (default) and no VAST_ENDPOINT is set,
+        // ad_provider_type falls back to Static. In prod mode this emits a
+        // tracing::warn! so operators know ads are served from static provider.
+        with_env(
+            &[
+                ("PORT", "8080"),
+                ("BASE_URL", "https://example.com"),
+                ("ORIGIN_URL", "https://example.com"),
+            ],
+            &["DEV_MODE", "AD_PROVIDER_TYPE", "VAST_ENDPOINT"],
+            || {
+                let config = Config::from_env().unwrap();
+                assert_eq!(config.ad_provider_type, AdProviderType::Static);
+                assert!(config.vast_endpoint.is_none());
+            },
+        );
+    }
+
+    #[test]
+    fn manifest_cache_ttl_defaults_to_2000() {
+        with_env(&[("DEV_MODE", "true")], &["MANIFEST_CACHE_TTL_MS"], || {
+            let config = Config::from_env().unwrap();
+            assert_eq!(config.manifest_cache_ttl_ms, 2000);
+        });
+    }
+
+    #[test]
+    fn manifest_cache_ttl_custom_value() {
+        with_env(
+            &[("DEV_MODE", "true"), ("MANIFEST_CACHE_TTL_MS", "500")],
+            &[],
+            || {
+                let config = Config::from_env().unwrap();
+                assert_eq!(config.manifest_cache_ttl_ms, 500);
+            },
+        );
+    }
+
+    #[test]
+    fn vast_explicit_without_endpoint_still_selects_vast() {
+        // When AD_PROVIDER_TYPE is explicitly "vast" but no VAST_ENDPOINT is set,
+        // the provider type is Vast (as requested) but a warning is emitted in prod.
+        with_env(
+            &[
+                ("PORT", "8080"),
+                ("BASE_URL", "https://example.com"),
+                ("ORIGIN_URL", "https://example.com"),
+                ("AD_PROVIDER_TYPE", "vast"),
+            ],
+            &["DEV_MODE", "VAST_ENDPOINT"],
+            || {
+                let config = Config::from_env().unwrap();
+                assert_eq!(config.ad_provider_type, AdProviderType::Vast);
+                assert!(config.vast_endpoint.is_none());
             },
         );
     }

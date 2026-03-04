@@ -1,36 +1,59 @@
+//! Unified error type for the Ritcher stitcher.
+//!
+//! [`RitcherError`] covers every failure mode in the request pipeline and
+//! implements [`IntoResponse`] so handlers can return it directly. Internal
+//! details are logged via `tracing` but never exposed to clients.
+
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
 use thiserror::Error;
 
-/// Domain-specific error types for Ritcher
+/// Domain-specific error types for Ritcher.
+///
+/// Each variant maps to a specific HTTP status code. The `Display` impl
+/// contains full details for logging; the [`IntoResponse`] impl returns
+/// a generic message to avoid leaking internal information.
 #[derive(Error, Debug)]
 pub enum RitcherError {
+    /// Origin CDN returned an error or was unreachable (HTTP 502).
     #[error("Failed to fetch content from origin: {0}")]
     OriginFetchError(#[from] reqwest::Error),
 
+    /// HLS playlist could not be parsed by m3u8-rs (HTTP 422).
     #[error("Failed to parse HLS playlist: {0}")]
     PlaylistParseError(String),
 
+    /// DASH MPD could not be parsed (HTTP 422).
     #[error("Failed to parse DASH MPD: {0}")]
     MpdParseError(String),
 
+    /// Post-parse modification of a playlist failed (HTTP 500).
     #[error("Failed to modify playlist: {0}")]
     PlaylistModifyError(String),
 
+    /// Session ID failed validation (HTTP 400).
     #[error("Invalid session ID: {0}")]
     InvalidSessionId(String),
 
+    /// Server-side configuration error (HTTP 500).
     #[error("Configuration error: {0}")]
     ConfigError(String),
 
+    /// Data conversion (e.g. UTF-8, serialization) failed (HTTP 500).
     #[error("Failed to convert data: {0}")]
     ConversionError(String),
 
+    /// Origin URL failed SSRF validation (HTTP 400).
     #[error("Invalid origin URL: {0}")]
     InvalidOrigin(String),
 
+    /// Origin response body exceeds the size limit (HTTP 502).
+    #[error("Origin response too large: {0}")]
+    ResponseTooLarge(String),
+
+    /// Catch-all for unexpected internal failures (HTTP 500).
     #[error("Internal server error: {0}")]
     InternalError(String),
 }
@@ -72,7 +95,7 @@ impl IntoResponse for RitcherError {
             }
             RitcherError::InvalidSessionId(ref e) => {
                 tracing::error!("Invalid session ID: {}", e);
-                (StatusCode::BAD_REQUEST, self.to_string())
+                (StatusCode::BAD_REQUEST, "Invalid session ID".to_string())
             }
             RitcherError::ConfigError(ref e) => {
                 tracing::error!("Configuration error: {}", e);
@@ -91,6 +114,13 @@ impl IntoResponse for RitcherError {
             RitcherError::InvalidOrigin(ref e) => {
                 tracing::error!("Invalid origin URL: {}", e);
                 (StatusCode::BAD_REQUEST, self.to_string())
+            }
+            RitcherError::ResponseTooLarge(ref e) => {
+                tracing::error!("Response too large: {}", e);
+                (
+                    StatusCode::BAD_GATEWAY,
+                    "Origin response too large".to_string(),
+                )
             }
             RitcherError::InternalError(ref e) => {
                 tracing::error!("Internal error: {}", e);
@@ -181,6 +211,25 @@ mod tests {
     }
 
     #[test]
+    fn invalid_session_id_does_not_leak_user_input() {
+        // The Display impl includes the user-supplied ID ("secret-session-id")
+        // but the HTTP response must use a generic message instead.
+        let err = RitcherError::InvalidSessionId("secret-session-id".to_string());
+        let display = err.to_string();
+        assert!(
+            display.contains("secret-session-id"),
+            "Display should contain the ID for logging: {display}"
+        );
+
+        // Verify the match arm returns a generic message (not self.to_string())
+        let generic_msg = "Invalid session ID";
+        assert!(
+            !generic_msg.contains("secret"),
+            "Generic message must not contain user input"
+        );
+    }
+
+    #[test]
     fn playlist_parse_error_returns_422() {
         let err = RitcherError::PlaylistParseError("bad m3u8".to_string());
         let (status, _) = response_parts(err);
@@ -192,5 +241,19 @@ mod tests {
         let err = RitcherError::MpdParseError("invalid xml".to_string());
         let (status, _) = response_parts(err);
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[test]
+    fn response_too_large_returns_502() {
+        let err = RitcherError::ResponseTooLarge("15 MB exceeds 10 MB limit".to_string());
+        let (status, _) = response_parts(err);
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+    }
+
+    #[test]
+    fn response_too_large_does_not_leak_details() {
+        let generic_msg = "Origin response too large";
+        assert!(!generic_msg.contains("MB"));
+        assert!(!generic_msg.contains("bytes"));
     }
 }

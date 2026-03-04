@@ -3,23 +3,34 @@ use crate::{
     dash::{cue, interleaver, parser, sgai},
     error::Result,
     metrics,
-    server::{state::AppState, url_validation::validate_origin_url},
+    server::{
+        MAX_MANIFEST_SIZE,
+        state::AppState,
+        url_validation::{validate_origin_url, validate_session_id},
+    },
 };
 use axum::{
     extract::{Path, Query, State},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
+use futures_util::StreamExt;
 use std::collections::HashMap;
 use std::time::Instant;
 use tracing::info;
 
-/// Serve modified DASH manifest with stitched ad Periods
+/// Serve a modified DASH MPD with stitched ad Periods.
+///
+/// Fetches the origin MPD, detects SCTE-35 EventStream ad breaks, and
+/// either inserts ad Periods (SSAI) or injects callback EventStreams (SGAI).
+///
+/// Returns `application/dash+xml` with HTTP 200 on success.
 pub async fn serve_manifest(
     Path(session_id): Path<String>,
     Query(params): Query<HashMap<String, String>>,
     State(state): State<AppState>,
 ) -> Result<Response> {
+    validate_session_id(&session_id)?;
     let start = Instant::now();
     info!("Serving DASH manifest for session: {}", session_id);
 
@@ -57,7 +68,42 @@ pub async fn serve_manifest(
             ));
         }
 
-        let body = response.text().await?;
+        // Check Content-Length header if present for early rejection
+        if let Some(content_length) = response.content_length()
+            && content_length > MAX_MANIFEST_SIZE
+        {
+            metrics::record_origin_error();
+            return Err(crate::error::RitcherError::ResponseTooLarge(format!(
+                "Content-Length {} bytes exceeds {} byte limit",
+                content_length, MAX_MANIFEST_SIZE
+            )));
+        }
+
+        // Stream body incrementally to enforce size limit.
+        // Unlike `response.bytes()` which buffers the entire body before
+        // the size check, this aborts as soon as the limit is exceeded —
+        // protecting against chunked-encoding OOM attacks.
+        let mut body_buf = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result.map_err(crate::error::RitcherError::OriginFetchError)?;
+            body_buf.extend_from_slice(&chunk);
+            if body_buf.len() as u64 > MAX_MANIFEST_SIZE {
+                metrics::record_origin_error();
+                return Err(crate::error::RitcherError::ResponseTooLarge(format!(
+                    "Response body exceeded {} byte limit while streaming",
+                    MAX_MANIFEST_SIZE
+                )));
+            }
+        }
+
+        let body = String::from_utf8(body_buf).map_err(|e| {
+            crate::error::RitcherError::MpdParseError(format!(
+                "Response body is not valid UTF-8: {}",
+                e
+            ))
+        })?;
+
         state.manifest_cache.insert(origin_url, body.clone());
         body
     };
@@ -83,10 +129,11 @@ pub async fn serve_manifest(
                 // Step 2: Get ad segments for each break
                 let mut ad_segments_per_break = Vec::with_capacity(ad_breaks.len());
                 for ad_break in &ad_breaks {
-                    let segs = state
-                        .ad_provider
-                        .get_ad_segments(ad_break.duration as f32, &session_id)
-                        .await;
+                    // DASH ad break durations (f64) are typically < 300s; f32
+                    // precision loss at that magnitude is negligible for ad fetching.
+                    #[allow(clippy::cast_possible_truncation)]
+                    let dur = ad_break.duration as f32;
+                    let segs = state.ad_provider.get_ad_segments(dur, &session_id).await;
                     ad_segments_per_break.push(segs);
                 }
 

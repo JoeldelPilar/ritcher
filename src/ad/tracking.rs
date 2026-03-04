@@ -88,9 +88,8 @@ pub fn fire_beacon(client: Client, url: String, event_name: String) {
         // Acquire a permit to bound concurrent beacon requests.
         // If all 50 slots are in use, this waits (beacons already have a 2s
         // timeout so queuing briefly is acceptable for best-effort tracking).
-        let _permit = match BEACON_SEMAPHORE.acquire().await {
-            Ok(permit) => permit,
-            Err(_) => return, // Semaphore closed — server shutting down
+        let Ok(_permit) = BEACON_SEMAPHORE.acquire().await else {
+            return; // Semaphore closed — server shutting down
         };
 
         match client

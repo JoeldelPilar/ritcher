@@ -2,7 +2,10 @@ use crate::{
     error::Result,
     http_retry::{RetryConfig, fetch_with_retry},
     metrics,
-    server::{state::AppState, url_validation::validate_origin_url},
+    server::{
+        state::AppState,
+        url_validation::{validate_origin_url, validate_session_id},
+    },
 };
 use axum::{
     body::Body,
@@ -71,14 +74,17 @@ fn hex_val(b: u8) -> Option<u8> {
     }
 }
 
-/// Proxy video segments from origin to player
+/// Proxy content segments from origin to the player.
 ///
+/// Validates the segment path against path-traversal attacks, then streams
+/// the segment from the origin CDN to the client without buffering.
 /// Uses [`fetch_with_retry`] for fault-tolerant HTTP fetching.
 pub async fn serve_segment(
     Path((session_id, segment_path)): Path<(String, String)>,
     Query(params): Query<HashMap<String, String>>,
     State(state): State<AppState>,
 ) -> Result<Response> {
+    validate_session_id(&session_id)?;
     let start = Instant::now();
     info!(
         "Serving segment: {} for session: {}",

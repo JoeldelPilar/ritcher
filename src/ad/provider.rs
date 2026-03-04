@@ -109,7 +109,7 @@ pub trait AdProvider: Send + Sync {
     /// Evict stale entries from provider-side caches.
     ///
     /// Default: no-op — stateless providers have nothing to evict.
-    /// Providers with internal caches (e.g. [`VastAdProvider`]) override this
+    /// Providers with internal caches (e.g. `VastAdProvider`) override this
     /// to enforce TTL and size limits.
     fn cleanup_cache(&self) {}
 
@@ -199,6 +199,9 @@ impl AdProvider for StaticAdProvider {
         );
 
         // Calculate how many segments we need to fill the duration
+        // Duration and segment_duration are positive f32; ceil() yields a non-negative
+        // finite value well within usize range for realistic ad durations.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let num_segments = (duration / self.segment_duration).ceil() as usize;
         let num_segments = num_segments.max(1); // At least one segment
 
@@ -383,6 +386,9 @@ impl AdProvider for DemoAdProvider {
             session_id, duration
         );
 
+        // Duration and segment_duration are positive f32; ceil() yields a non-negative
+        // finite value well within usize range for realistic ad durations.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let num_segments = (duration / self.segment_duration).ceil() as usize;
         let num_segments = num_segments.max(1);
 

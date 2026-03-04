@@ -4,24 +4,36 @@ use crate::{
     error::Result,
     hls::{cue, interstitial, ll_hls, parser},
     metrics,
-    server::{state::AppState, url_validation::validate_origin_url},
+    server::{
+        MAX_MANIFEST_SIZE,
+        state::AppState,
+        url_validation::{validate_origin_url, validate_session_id},
+    },
 };
 use axum::{
     extract::{Path, Query, State},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
+use futures_util::StreamExt;
 use m3u8_rs::Playlist;
 use std::collections::HashMap;
 use std::time::Instant;
 use tracing::info;
 
-/// Serve modified HLS playlist with stitched ad markers
+/// Serve a modified HLS playlist with stitched ad markers.
+///
+/// Fetches the origin playlist, detects SCTE-35 CUE ad breaks, and either
+/// interleaves ad segments (SSAI) or injects `EXT-X-DATERANGE` interstitial
+/// markers (SGAI). LL-HLS query parameters are forwarded to the origin.
+///
+/// Returns `application/vnd.apple.mpegurl` with HTTP 200 on success.
 pub async fn serve_playlist(
     Path(session_id): Path<String>,
     Query(params): Query<HashMap<String, String>>,
     State(state): State<AppState>,
 ) -> Result<Response> {
+    validate_session_id(&session_id)?;
     let start = Instant::now();
     info!("Serving playlist for session: {}", session_id);
 
@@ -33,6 +45,9 @@ pub async fn serve_playlist(
     } else {
         &state.config.origin_url
     };
+
+    // Validate LL-HLS numeric params before forwarding.
+    validate_ll_hls_params(&params)?;
 
     // Forward LL-HLS query params (_HLS_msn, _HLS_part, etc.) to origin
     // so the origin can block until the requested MSN/part is available.
@@ -72,7 +87,42 @@ pub async fn serve_playlist(
             ));
         }
 
-        let body = response.text().await?;
+        // Check Content-Length header if present for early rejection
+        if let Some(content_length) = response.content_length()
+            && content_length > MAX_MANIFEST_SIZE
+        {
+            metrics::record_origin_error();
+            return Err(crate::error::RitcherError::ResponseTooLarge(format!(
+                "Content-Length {} bytes exceeds {} byte limit",
+                content_length, MAX_MANIFEST_SIZE
+            )));
+        }
+
+        // Stream body incrementally to enforce size limit.
+        // Unlike `response.bytes()` which buffers the entire body before
+        // the size check, this aborts as soon as the limit is exceeded —
+        // protecting against chunked-encoding OOM attacks.
+        let mut body_buf = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result.map_err(crate::error::RitcherError::OriginFetchError)?;
+            body_buf.extend_from_slice(&chunk);
+            if body_buf.len() as u64 > MAX_MANIFEST_SIZE {
+                metrics::record_origin_error();
+                return Err(crate::error::RitcherError::ResponseTooLarge(format!(
+                    "Response body exceeded {} byte limit while streaming",
+                    MAX_MANIFEST_SIZE
+                )));
+            }
+        }
+
+        let body = String::from_utf8(body_buf).map_err(|e| {
+            crate::error::RitcherError::PlaylistParseError(format!(
+                "Response body is not valid UTF-8: {}",
+                e
+            ))
+        })?;
+
         // Only cache non-blocking responses (LL-HLS blocking results are ephemeral)
         if !is_blocking_reload {
             state.manifest_cache.insert(origin_url, body.clone());
@@ -245,6 +295,36 @@ async fn process_playlist(
     parser::rewrite_content_urls(playlist, session_id, base_url, origin_base)
 }
 
+/// Maximum allowed value for `_HLS_msn` and `_HLS_part` query parameters.
+///
+/// Acts as a sanity check -- no real playlist should have a media sequence
+/// number or part index exceeding 1 million.
+const MAX_LL_HLS_VALUE: u64 = 1_000_000;
+
+/// Validate `_HLS_msn` and `_HLS_part` query parameters if present.
+///
+/// Both must be parseable as `u64` and not exceed [`MAX_LL_HLS_VALUE`].
+/// Returns HTTP 400 if validation fails.
+fn validate_ll_hls_params(params: &HashMap<String, String>) -> Result<()> {
+    for key in &["_HLS_msn", "_HLS_part"] {
+        if let Some(val) = params.get(*key) {
+            let parsed: u64 = val.parse().map_err(|_| {
+                crate::error::RitcherError::InvalidOrigin(format!(
+                    "Invalid {} value: must be a non-negative integer",
+                    key
+                ))
+            })?;
+            if parsed > MAX_LL_HLS_VALUE {
+                return Err(crate::error::RitcherError::InvalidOrigin(format!(
+                    "Invalid {} value: exceeds maximum {}",
+                    key, MAX_LL_HLS_VALUE
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Append `_HLS_*` query parameters to an origin URL for LL-HLS blocking reload.
 ///
 /// LL-HLS players send `_HLS_msn`, `_HLS_part`, `_HLS_push`, and `_HLS_skip`
@@ -265,4 +345,106 @@ fn append_ll_hls_params(origin_url: &str, params: &HashMap<String, String>) -> S
 
     let sep = if origin_url.contains('?') { "&" } else { "?" };
     format!("{}{}{}", origin_url, sep, ll_params.join("&"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_ll_hls_params_accepts_valid_values() {
+        let mut params = HashMap::new();
+        params.insert("_HLS_msn".to_string(), "100".to_string());
+        params.insert("_HLS_part".to_string(), "3".to_string());
+        assert!(validate_ll_hls_params(&params).is_ok());
+    }
+
+    #[test]
+    fn validate_ll_hls_params_accepts_zero() {
+        let mut params = HashMap::new();
+        params.insert("_HLS_msn".to_string(), "0".to_string());
+        assert!(validate_ll_hls_params(&params).is_ok());
+    }
+
+    #[test]
+    fn validate_ll_hls_params_accepts_max_value() {
+        let mut params = HashMap::new();
+        params.insert("_HLS_msn".to_string(), "1000000".to_string());
+        assert!(validate_ll_hls_params(&params).is_ok());
+    }
+
+    #[test]
+    fn validate_ll_hls_params_rejects_non_numeric_msn() {
+        let mut params = HashMap::new();
+        params.insert("_HLS_msn".to_string(), "abc".to_string());
+        assert!(validate_ll_hls_params(&params).is_err());
+    }
+
+    #[test]
+    fn validate_ll_hls_params_rejects_non_numeric_part() {
+        let mut params = HashMap::new();
+        params.insert("_HLS_part".to_string(), "xyz".to_string());
+        assert!(validate_ll_hls_params(&params).is_err());
+    }
+
+    #[test]
+    fn validate_ll_hls_params_rejects_negative_values() {
+        let mut params = HashMap::new();
+        params.insert("_HLS_msn".to_string(), "-1".to_string());
+        assert!(validate_ll_hls_params(&params).is_err());
+    }
+
+    #[test]
+    fn validate_ll_hls_params_rejects_exceeding_max() {
+        let mut params = HashMap::new();
+        params.insert("_HLS_msn".to_string(), "1000001".to_string());
+        assert!(validate_ll_hls_params(&params).is_err());
+    }
+
+    #[test]
+    fn validate_ll_hls_params_ignores_other_params() {
+        let mut params = HashMap::new();
+        params.insert("origin".to_string(), "https://example.com".to_string());
+        params.insert("_HLS_skip".to_string(), "YES".to_string());
+        // _HLS_skip is not validated (string param, not numeric)
+        assert!(validate_ll_hls_params(&params).is_ok());
+    }
+
+    #[test]
+    fn validate_ll_hls_params_empty_is_ok() {
+        let params = HashMap::new();
+        assert!(validate_ll_hls_params(&params).is_ok());
+    }
+
+    #[test]
+    fn append_ll_hls_params_no_params() {
+        let params = HashMap::new();
+        let url = append_ll_hls_params("https://origin.example.com/live.m3u8", &params);
+        assert_eq!(url, "https://origin.example.com/live.m3u8");
+    }
+
+    #[test]
+    fn append_ll_hls_params_with_msn() {
+        let mut params = HashMap::new();
+        params.insert("_HLS_msn".to_string(), "42".to_string());
+        let url = append_ll_hls_params("https://origin.example.com/live.m3u8", &params);
+        assert!(url.contains("_HLS_msn=42"));
+        assert!(url.contains('?'));
+    }
+
+    #[test]
+    fn append_ll_hls_params_ignores_non_hls() {
+        let mut params = HashMap::new();
+        params.insert("origin".to_string(), "https://example.com".to_string());
+        let url = append_ll_hls_params("https://origin.example.com/live.m3u8", &params);
+        assert_eq!(url, "https://origin.example.com/live.m3u8");
+    }
+
+    #[test]
+    fn append_ll_hls_params_existing_query() {
+        let mut params = HashMap::new();
+        params.insert("_HLS_msn".to_string(), "10".to_string());
+        let url = append_ll_hls_params("https://origin.example.com/live.m3u8?token=abc", &params);
+        assert!(url.contains("&_HLS_msn=10"));
+    }
 }

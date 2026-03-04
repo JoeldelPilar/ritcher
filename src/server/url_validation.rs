@@ -3,6 +3,44 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use tracing::warn;
 use url::{Host, Url};
 
+/// Maximum allowed session ID length in characters.
+const MAX_SESSION_ID_LEN: usize = 64;
+
+/// Validate that a session ID is well-formed.
+///
+/// Rules:
+/// - Non-empty
+/// - At most `MAX_SESSION_ID_LEN` (64) characters
+/// - Only ASCII alphanumeric, hyphen (`-`), or underscore (`_`)
+///
+/// # Errors
+/// Returns [`RitcherError::InvalidSessionId`] if the ID violates any rule.
+pub fn validate_session_id(id: &str) -> Result<(), RitcherError> {
+    if id.is_empty() {
+        return Err(RitcherError::InvalidSessionId(
+            "Session ID must not be empty".to_string(),
+        ));
+    }
+
+    if id.len() > MAX_SESSION_ID_LEN {
+        return Err(RitcherError::InvalidSessionId(format!(
+            "Session ID exceeds maximum length of {} characters",
+            MAX_SESSION_ID_LEN
+        )));
+    }
+
+    if !id
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err(RitcherError::InvalidSessionId(
+            "Session ID contains invalid characters (only a-z, A-Z, 0-9, -, _ allowed)".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 /// Validate that an origin URL is safe to fetch (SSRF protection).
 ///
 /// Accepts only `http://` and `https://` URLs with a non-private host.
@@ -396,5 +434,50 @@ mod tests {
             msg.contains("not allowed"),
             "Error should contain generic message, got: {msg}"
         );
+    }
+
+    // --- Session ID validation ---
+
+    #[test]
+    fn test_valid_session_id() {
+        assert!(validate_session_id("abc123").is_ok());
+        assert!(validate_session_id("session-1").is_ok());
+        assert!(validate_session_id("my_session").is_ok());
+        assert!(validate_session_id("ABC-def_123").is_ok());
+        assert!(validate_session_id("a").is_ok());
+    }
+
+    #[test]
+    fn test_session_id_exact_boundary_64() {
+        let id = "a".repeat(64);
+        assert!(validate_session_id(&id).is_ok());
+    }
+
+    #[test]
+    fn test_session_id_too_long_65() {
+        let id = "a".repeat(65);
+        assert!(validate_session_id(&id).is_err());
+    }
+
+    #[test]
+    fn test_session_id_empty() {
+        assert!(validate_session_id("").is_err());
+    }
+
+    #[test]
+    fn test_session_id_special_chars() {
+        assert!(validate_session_id("session/1").is_err());
+        assert!(validate_session_id("session.1").is_err());
+        assert!(validate_session_id("session 1").is_err());
+        assert!(validate_session_id("session@1").is_err());
+        assert!(validate_session_id("session!").is_err());
+        assert!(validate_session_id("../etc").is_err());
+    }
+
+    #[test]
+    fn test_session_id_unicode() {
+        assert!(validate_session_id("sessi\u{00f6}n").is_err());
+        assert!(validate_session_id("\u{1f600}").is_err());
+        assert!(validate_session_id("\u{00e9}").is_err());
     }
 }

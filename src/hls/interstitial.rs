@@ -52,7 +52,12 @@ pub fn ensure_program_date_time(playlist: &mut MediaPlaylist) {
     for seg in playlist.segments.iter_mut() {
         let pdt = base + chrono::Duration::milliseconds(offset_ms);
         seg.program_date_time = Some(pdt);
-        offset_ms += (seg.duration * 1000.0) as i64;
+        // Segment durations are positive f32 in seconds; multiplied by 1000 yields
+        // milliseconds well within i64 range. Truncation is intentional.
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            offset_ms += (seg.duration * 1000.0) as i64;
+        }
     }
 }
 
@@ -81,16 +86,13 @@ pub fn inject_interstitials(
             continue;
         }
 
-        let start_date = match compute_pdt_at(playlist, start_index) {
-            Some(dt) => dt,
-            None => {
-                // Should not happen after ensure_program_date_time(), but be safe
-                info!(
-                    "SGAI: No PDT available for segment {} — skipping interstitial injection",
-                    start_index
-                );
-                continue;
-            }
+        let Some(start_date) = compute_pdt_at(playlist, start_index) else {
+            // Should not happen after ensure_program_date_time(), but be safe
+            info!(
+                "SGAI: No PDT available for segment {} — skipping interstitial injection",
+                start_index
+            );
+            continue;
         };
 
         let asset_list_url = format!(
@@ -168,7 +170,9 @@ fn compute_pdt_at(playlist: &MediaPlaylist, target_index: usize) -> Option<DateT
         .filter_map(|(i, seg)| seg.program_date_time.map(|pdt| (i, pdt)))
         .next_back()?;
 
-    // Accumulate duration from anchor to target
+    // Accumulate duration from anchor to target.
+    // Segment durations are positive f32 in seconds; ms values fit in i64.
+    #[allow(clippy::cast_possible_truncation)]
     let offset_ms: i64 = playlist.segments[anchor_index..target_index]
         .iter()
         .map(|s| (s.duration * 1000.0) as i64)

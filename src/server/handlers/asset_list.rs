@@ -17,7 +17,11 @@
 //! ```
 
 use crate::ad::vast::Verification;
-use crate::{error::Result, metrics, server::state::AppState};
+use crate::{
+    error::Result,
+    metrics,
+    server::{state::AppState, url_validation::validate_session_id},
+};
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -71,28 +75,56 @@ impl From<&Verification> for VerificationOutput {
     }
 }
 
-/// Serve HLS Interstitials asset-list JSON
+/// Maximum allowed ad break duration in seconds.
+const MAX_DUR: f32 = 600.0;
+
+/// Validate the `dur` query parameter.
+///
+/// Must be parseable as `f32`, finite (not NaN/Infinity), and in the
+/// range `0.0..=600.0`. Returns HTTP 400 on invalid input.
+fn validate_dur_param(value: &str) -> crate::error::Result<f32> {
+    let dur: f32 = value.parse().map_err(|_| {
+        crate::error::RitcherError::InvalidOrigin(
+            "Invalid dur parameter: must be a number".to_string(),
+        )
+    })?;
+    if !dur.is_finite() {
+        return Err(crate::error::RitcherError::InvalidOrigin(
+            "Invalid dur parameter: must be finite".to_string(),
+        ));
+    }
+    if !(0.0..=MAX_DUR).contains(&dur) {
+        return Err(crate::error::RitcherError::InvalidOrigin(format!(
+            "Invalid dur parameter: must be between 0 and {}",
+            MAX_DUR
+        )));
+    }
+    Ok(dur)
+}
+
+/// Serve HLS Interstitials asset-list JSON.
 ///
 /// Called by the player for each ad break it encounters. Returns the list of
 /// ad creatives (URI + duration) the player should fetch and play inline.
 ///
 /// Query params:
-/// - `dur` — requested ad break duration in seconds (default: 30.0)
+/// - `dur` -- requested ad break duration in seconds (default: 30.0, max: 600.0)
 pub async fn serve_asset_list(
     Path((session_id, break_id)): Path<(String, String)>,
     Query(params): Query<HashMap<String, String>>,
     State(state): State<AppState>,
 ) -> Result<Response> {
+    validate_session_id(&session_id)?;
     let start = Instant::now();
     info!(
         "Serving asset-list for session: {} break: {}",
         session_id, break_id
     );
 
-    let duration: f32 = params
-        .get("dur")
-        .and_then(|d| d.parse().ok())
-        .unwrap_or(30.0);
+    let duration: f32 = match params.get("dur") {
+        Some(d) => validate_dur_param(d)?,
+        None => 30.0,
+    };
 
     let creatives = state
         .ad_provider
@@ -246,6 +278,46 @@ mod tests {
         assert!(!json.contains("\"parameters\""));
         assert!(!json.contains("\"api_framework\""));
         assert!(json.contains("\"resource\""));
+    }
+
+    // === validate_dur_param tests ===
+
+    #[test]
+    fn test_dur_valid_values() {
+        assert_eq!(validate_dur_param("30.0").unwrap(), 30.0);
+        assert_eq!(validate_dur_param("0").unwrap(), 0.0);
+        assert_eq!(validate_dur_param("600").unwrap(), 600.0);
+        assert_eq!(validate_dur_param("15.5").unwrap(), 15.5);
+    }
+
+    #[test]
+    fn test_dur_rejects_non_numeric() {
+        assert!(validate_dur_param("abc").is_err());
+        assert!(validate_dur_param("").is_err());
+        assert!(validate_dur_param("ten").is_err());
+    }
+
+    #[test]
+    fn test_dur_rejects_infinity() {
+        assert!(validate_dur_param("inf").is_err());
+        assert!(validate_dur_param("infinity").is_err());
+    }
+
+    #[test]
+    fn test_dur_rejects_nan() {
+        assert!(validate_dur_param("NaN").is_err());
+    }
+
+    #[test]
+    fn test_dur_rejects_negative() {
+        assert!(validate_dur_param("-1.0").is_err());
+        assert!(validate_dur_param("-0.1").is_err());
+    }
+
+    #[test]
+    fn test_dur_rejects_exceeding_max() {
+        assert!(validate_dur_param("600.1").is_err());
+        assert!(validate_dur_param("1000").is_err());
     }
 
     #[test]

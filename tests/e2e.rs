@@ -13,6 +13,9 @@ use m3u8_rs::Playlist;
 use ritcher::config::{AdProviderType, Config, SessionStoreType, StitchingMode};
 use ritcher::server::build_router;
 use std::net::SocketAddr;
+use std::time::Duration;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 // ── Test server helpers ───────────────────────────────────────────────────────
 
@@ -44,7 +47,28 @@ async fn start_server(mode: StitchingMode, origin_path: &str) -> SocketAddr {
         session_ttl_secs: 300,
         rate_limit_rpm: 0,
         demo_ad_base_url: None,
+        origin_timeout_secs: 30,
+        manifest_cache_ttl_ms: 2000,
     };
+
+    let app = build_router(config).await;
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    addr
+}
+
+/// Spin up a test server with a fully custom config.
+///
+/// Unlike `start_server`, this accepts a pre-built Config so the caller can
+/// control origin_url, rate_limit_rpm, origin_timeout_secs, etc.
+async fn start_server_with_config(config: Config) -> SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("Failed to bind test server");
+    let addr = listener.local_addr().unwrap();
 
     let app = build_router(config).await;
 
@@ -543,6 +567,213 @@ async fn regular_hls_unaffected_by_ll_hls() {
     assert!(
         body.contains("EXT-X-DATERANGE"),
         "Regular SGAI should still have DATERANGE, got:\n{}",
+        body
+    );
+}
+
+// ── Failure scenario tests ───────────────────────────────────────────────────
+
+/// Build a base test config pointing origin_url at a mock server path.
+///
+/// Uses `is_dev: true` to disable the SSRF-safe DNS resolver (wiremock binds
+/// to 127.0.0.1, which the resolver would block).
+fn test_config_with_origin(origin_url: &str) -> Config {
+    Config {
+        port: 0,
+        base_url: "http://localhost:3000".to_string(),
+        origin_url: origin_url.to_string(),
+        is_dev: true,
+        stitching_mode: StitchingMode::Ssai,
+        ad_provider_type: AdProviderType::Static,
+        ad_source_url: "https://hls.src.tedm.io/content/ts_h264_480p_1s".to_string(),
+        ad_segment_duration: 1.0,
+        vast_endpoint: None,
+        slate_url: None,
+        slate_segment_duration: 1.0,
+        session_store: SessionStoreType::Memory,
+        valkey_url: None,
+        session_ttl_secs: 300,
+        rate_limit_rpm: 0,
+        demo_ad_base_url: None,
+        origin_timeout_secs: 30,
+        manifest_cache_ttl_ms: 2000,
+    }
+}
+
+/// Origin that responds very slowly should trigger a timeout in the stitcher's
+/// HTTP client. The server returns 502 (Bad Gateway) to the player.
+///
+/// Uses a 1-second client timeout and a 60-second mock delay to guarantee
+/// the timeout fires without making the test wait 30 seconds.
+#[tokio::test]
+async fn origin_timeout_returns_502() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/slow-playlist.m3u8"))
+        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(60)))
+        .mount(&mock_server)
+        .await;
+
+    let mut config = test_config_with_origin(&format!("{}/slow-playlist.m3u8", mock_server.uri()));
+    config.origin_timeout_secs = 1; // Short timeout so the test completes quickly
+
+    let addr = start_server_with_config(config).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("http://{}/stitch/timeout-test/playlist.m3u8", addr))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        502,
+        "Origin timeout should return 502 Bad Gateway"
+    );
+}
+
+/// Origin returning a 5xx status should result in 502 from the stitcher.
+#[tokio::test]
+async fn origin_5xx_returns_502() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/broken-playlist.m3u8"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&mock_server)
+        .await;
+
+    let config = test_config_with_origin(&format!("{}/broken-playlist.m3u8", mock_server.uri()));
+
+    let addr = start_server_with_config(config).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("http://{}/stitch/error-test/playlist.m3u8", addr))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        502,
+        "Origin 503 should return 502 Bad Gateway"
+    );
+
+    // Error body must not leak internal origin URL
+    let body = resp.text().await.unwrap();
+    assert!(
+        !body.contains("127.0.0.1"),
+        "Error body must not leak internal IP, got: {}",
+        body
+    );
+}
+
+/// Rate limiter: once the per-IP limit is exceeded, subsequent requests
+/// should get 429 Too Many Requests.
+///
+/// Uses a very low rate limit (2 RPM) to trigger the block quickly.
+#[tokio::test]
+async fn rate_limiting_blocks_excessive_requests() {
+    let addr = {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("Failed to bind test server");
+        let addr = listener.local_addr().unwrap();
+
+        let config = Config {
+            port: 0,
+            base_url: format!("http://{}", addr),
+            origin_url: format!("http://{}/demo/playlist.m3u8", addr),
+            is_dev: true,
+            stitching_mode: StitchingMode::Ssai,
+            ad_provider_type: AdProviderType::Static,
+            ad_source_url: "https://hls.src.tedm.io/content/ts_h264_480p_1s".to_string(),
+            ad_segment_duration: 1.0,
+            vast_endpoint: None,
+            slate_url: None,
+            slate_segment_duration: 1.0,
+            session_store: SessionStoreType::Memory,
+            valkey_url: None,
+            session_ttl_secs: 300,
+            rate_limit_rpm: 2,
+            demo_ad_base_url: None,
+            origin_timeout_secs: 30,
+            manifest_cache_ttl_ms: 2000,
+        };
+
+        let app = build_router(config).await;
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        addr
+    };
+
+    let client = reqwest::Client::new();
+
+    // First 2 requests should succeed (limit = 2 RPM)
+    for i in 0..2 {
+        let resp = client
+            .get(format!("http://{}/health", addr))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            200,
+            "Request {} should succeed (under limit)",
+            i + 1
+        );
+    }
+
+    // 3rd request should be rate-limited
+    let resp = client
+        .get(format!("http://{}/health", addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        429,
+        "3rd request should be rate-limited (429 Too Many Requests)"
+    );
+}
+
+/// Session ID containing XSS payload must return 400 and must NOT reflect
+/// the payload in the response body.
+#[tokio::test]
+async fn invalid_session_id_no_xss_reflection() {
+    let addr = start_test_server().await;
+    let client = reqwest::Client::new();
+
+    // URL-encode the XSS payload so it reaches the handler as a path parameter
+    let xss_payload = "%3Cscript%3Ealert(1)%3C%2Fscript%3E";
+    let resp = client
+        .get(format!(
+            "http://{}/stitch/{}/playlist.m3u8",
+            addr, xss_payload
+        ))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        400,
+        "XSS session ID should return 400 Bad Request"
+    );
+
+    let body = resp.text().await.unwrap();
+    assert!(
+        !body.contains("<script>"),
+        "Response must not reflect XSS payload, got: {}",
+        body
+    );
+    assert!(
+        !body.contains("alert(1)"),
+        "Response must not reflect XSS payload, got: {}",
         body
     );
 }
