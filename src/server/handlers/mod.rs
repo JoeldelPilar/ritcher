@@ -1,6 +1,7 @@
 pub mod ad;
 pub mod asset_list;
 pub mod demo;
+pub mod dev;
 pub mod health;
 pub mod manifest;
 pub mod metrics;

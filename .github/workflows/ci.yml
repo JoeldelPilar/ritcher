@@ -40,3 +40,6 @@ jobs:
 
       - name: Security audit
         run: cargo install cargo-audit --locked && cargo audit
+
+      - name: Supply chain check
+        run: cargo install cargo-deny --locked && cargo deny check

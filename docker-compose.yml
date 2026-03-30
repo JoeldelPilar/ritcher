@@ -1,0 +1,83 @@
+# Ritcher Integration Stack
+#
+# Usage:
+#   docker compose up              # SSAI mode with in-memory sessions
+#   docker compose up --profile distributed  # adds Valkey for distributed sessions
+#   STITCHING_MODE=sgai docker compose up    # SGAI mode
+#
+# Smoke test:
+#   ./scripts/smoke-test.sh
+
+services:
+  # ---------------------------------------------------------------------------
+  # Ritcher -- SSAI/SGAI stitcher (builds from local Dockerfile)
+  # ---------------------------------------------------------------------------
+  ritcher:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: "3000"
+      BASE_URL: "http://localhost:3000"
+      ORIGIN_URL: "http://fast-engine:8000/channels/ritcher-test/master.m3u8"
+      AD_PROVIDER_TYPE: "vast"
+      VAST_ENDPOINT: "http://test-adserver:8080/api/v1/vast?dur=[DURATION]"
+      STITCHING_MODE: "${STITCHING_MODE:-ssai}"
+      SESSION_STORE: "${SESSION_STORE:-memory}"
+      VALKEY_URL: "${VALKEY_URL:-}"
+      RATE_LIMIT_RPM: "0"
+      DEV_MODE: "true"
+    depends_on:
+      fast-engine:
+        condition: service_healthy
+      test-adserver:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 3s
+      start_period: 10s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # Eyevinn FAST Engine -- HLS origin with demo channels
+  # ---------------------------------------------------------------------------
+  fast-engine:
+    image: eyevinntechnology/fast-engine:v1.9.4
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthcheck"]
+      interval: 10s
+      timeout: 5s
+      start_period: 20s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # Eyevinn Test Adserver -- VAST ad response generator
+  # ---------------------------------------------------------------------------
+  test-adserver:
+    build:
+      context: https://github.com/Eyevinn/test-adserver.git#v1.7.2
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: "8080"
+
+  # ---------------------------------------------------------------------------
+  # Valkey -- distributed session store (optional)
+  # ---------------------------------------------------------------------------
+  valkey:
+    image: valkey/valkey:8-alpine
+    ports:
+      - "6379:6379"
+    profiles:
+      - distributed
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      start_period: 5s
+      retries: 5

@@ -113,7 +113,7 @@ impl IntoResponse for RitcherError {
             }
             RitcherError::InvalidOrigin(ref e) => {
                 tracing::error!("Invalid origin URL: {}", e);
-                (StatusCode::BAD_REQUEST, self.to_string())
+                (StatusCode::BAD_REQUEST, "Invalid origin URL".to_string())
             }
             RitcherError::ResponseTooLarge(ref e) => {
                 tracing::error!("Response too large: {}", e);

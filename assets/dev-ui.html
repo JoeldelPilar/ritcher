@@ -1,0 +1,633 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ritcher Dev</title>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.18"
+       integrity="sha384-R2JqybiEexSXz60H6Zz28MdsqWWnMQlP+NDb7nIhDHWxx6sM7Otw7OWCq9EBCPsz"
+       crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/shaka-player@4.7.11/dist/shaka-player.compiled.js"
+       integrity="sha384-st1duBzJGMbdc+HgFSvqF+smc6ibDL4VNXgsKBLHjVCI6Kojl1eCZGpYvuAEsoAJ"
+       crossorigin="anonymous"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:        #1a1a2e;
+    --surface:   #16213e;
+    --surface2:  #0f3460;
+    --border:    #2a2a4a;
+    --text:      #e0e0e0;
+    --text-dim:  #888;
+    --blue:      #3498db;
+    --orange:    #e67e22;
+    --red:       #e74c3c;
+    --green:     #2ecc71;
+    --mono:      'Consolas', 'Menlo', 'Monaco', monospace;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: 14px;
+    min-height: 100vh;
+  }
+
+  /* --- Header --- */
+  header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 20px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+  header h1 { font-size: 18px; font-weight: 700; letter-spacing: 0.5px; }
+  .health-badge {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+  .health-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--text-dim);
+    flex-shrink: 0;
+  }
+  .health-dot.ok  { background: var(--green); }
+  .health-dot.err { background: var(--red); }
+  .version-badge {
+    margin-left: auto;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 11px;
+    font-family: var(--mono);
+    color: var(--blue);
+  }
+
+  /* --- Controls --- */
+  .controls {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 10px 20px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 20px;
+  }
+  .ctrl-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .ctrl-label { color: var(--text-dim); font-size: 12px; white-space: nowrap; }
+  .radio-group { display: flex; gap: 4px; }
+  .radio-group label {
+    padding: 4px 12px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+    transition: background 0.15s, border-color 0.15s;
+    user-select: none;
+  }
+  .radio-group input[type=radio] { display: none; }
+  .radio-group input[type=radio]:checked + label {
+    background: var(--blue);
+    border-color: var(--blue);
+    color: #fff;
+  }
+  input[type=number], select {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text);
+    padding: 4px 8px;
+    font-size: 13px;
+    width: 70px;
+  }
+  select { width: auto; }
+  .session-id {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-dim);
+    background: var(--surface2);
+    padding: 4px 8px;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+    max-width: 160px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .btn-play {
+    background: var(--blue);
+    border: none;
+    border-radius: 4px;
+    color: #fff;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 6px 20px;
+    transition: opacity 0.15s;
+  }
+  .btn-play:hover { opacity: 0.85; }
+  .btn-play:active { opacity: 0.7; }
+
+  /* --- Main layout --- */
+  .main {
+    padding: 20px;
+    display: grid;
+    grid-template-columns: 1fr 360px;
+    gap: 20px;
+    max-width: 1400px;
+  }
+  @media (max-width: 1024px) {
+    .main { grid-template-columns: 1fr; }
+  }
+
+  /* --- Player column --- */
+  .video-wrap {
+    position: relative;
+    width: 100%;
+    max-width: 854px;
+    aspect-ratio: 16 / 9;
+    background: #000;
+    border-radius: 6px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+  }
+  video {
+    width: 100%; height: 100%;
+    display: block;
+  }
+  .player-overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+    color: var(--text-dim);
+    pointer-events: none;
+  }
+
+  /* --- Ad timeline --- */
+  .timeline-wrap {
+    margin-top: 10px;
+    max-width: 854px;
+  }
+  .timeline-label {
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-bottom: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .timeline-bar {
+    position: relative;
+    height: 20px;
+    background: var(--surface2);
+    border-radius: 4px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+  }
+  .timeline-segments {
+    display: flex;
+    height: 100%;
+    width: 100%;
+  }
+  .seg-block {
+    height: 100%;
+    min-width: 2px;
+    transition: flex 0.1s;
+  }
+  .seg-block.content { background: #2d6a9f; }
+  .seg-block.ad      { background: var(--orange); }
+  .playhead {
+    position: absolute;
+    top: 0; bottom: 0;
+    width: 2px;
+    background: #fff;
+    opacity: 0.9;
+    pointer-events: none;
+    transition: left 0.25s linear;
+  }
+
+  /* --- Info panel --- */
+  .info-panel {
+    background: var(--surface);
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    overflow: hidden;
+  }
+  .panel-section {
+    border-bottom: 1px solid var(--border);
+    padding: 12px 14px;
+  }
+  .panel-section:last-child { border-bottom: none; }
+  .panel-title {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-dim);
+    margin-bottom: 8px;
+  }
+  .stat-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 4px;
+    font-size: 12px;
+  }
+  .stat-row:last-child { margin-bottom: 0; }
+  .stat-key { color: var(--text-dim); }
+  .stat-val {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text);
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: right;
+  }
+  .stat-val.ok  { color: var(--green); }
+  .stat-val.err { color: var(--red); }
+  .stat-val.ad  { color: var(--orange); }
+
+  /* --- Event log --- */
+  .event-log {
+    font-family: var(--mono);
+    font-size: 11px;
+    line-height: 1.6;
+    max-height: 300px;
+    overflow-y: auto;
+    padding: 10px 14px;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+  .event-log::-webkit-scrollbar { width: 4px; }
+  .event-log::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+  .log-entry { display: flex; gap: 8px; margin-bottom: 2px; }
+  .log-time  { color: var(--text-dim); flex-shrink: 0; }
+  .log-msg.blue   { color: var(--blue); }
+  .log-msg.orange { color: var(--orange); }
+  .log-msg.red    { color: var(--red); }
+  .log-msg.green  { color: var(--green); }
+  .log-msg.dim    { color: var(--text-dim); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Ritcher Dev</h1>
+  <div class="health-badge">
+    <div class="health-dot" id="healthDot"></div>
+    <span id="healthText">Checking...</span>
+  </div>
+  <div class="version-badge" id="versionBadge">--</div>
+</header>
+
+<div class="controls">
+  <div class="ctrl-group">
+    <span class="ctrl-label">Format</span>
+    <div class="radio-group">
+      <input type="radio" name="fmt" id="fmtHls" value="hls" checked>
+      <label for="fmtHls">HLS</label>
+      <input type="radio" name="fmt" id="fmtDash" value="dash">
+      <label for="fmtDash">DASH</label>
+    </div>
+  </div>
+  <div class="ctrl-group">
+    <span class="ctrl-label">Breaks</span>
+    <input type="number" id="breaks" min="1" max="5" value="2">
+  </div>
+  <div class="ctrl-group">
+    <span class="ctrl-label">Interval</span>
+    <select id="interval">
+      <option value="10">10s</option>
+      <option value="20" selected>20s</option>
+      <option value="30">30s</option>
+    </select>
+  </div>
+  <div class="ctrl-group">
+    <span class="ctrl-label">Session</span>
+    <div class="session-id" id="sessionId"></div>
+  </div>
+  <button class="btn-play" id="btnPlay">Play</button>
+</div>
+
+<div class="main">
+  <div class="player-col">
+    <div class="video-wrap">
+      <video id="video" controls playsinline></video>
+      <div class="player-overlay" id="playerOverlay">Press Play to start</div>
+    </div>
+    <div class="timeline-wrap">
+      <div class="timeline-label">Segment Timeline</div>
+      <div class="timeline-bar">
+        <div class="timeline-segments" id="timelineSegments"></div>
+        <div class="playhead" id="playhead" style="left: 0%"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="info-panel">
+    <div class="panel-section">
+      <div class="panel-title">Stream Status</div>
+      <div class="stat-row">
+        <span class="stat-key">State</span>
+        <span class="stat-val" id="statState">idle</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-key">Current segment</span>
+        <span class="stat-val" id="statSegment">--</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-key">Ad breaks seen</span>
+        <span class="stat-val" id="statBreaks">0</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-key">Segments loaded</span>
+        <span class="stat-val" id="statSegs">0</span>
+      </div>
+    </div>
+    <div class="panel-section">
+      <div class="panel-title">Event Log</div>
+      <div class="event-log" id="eventLog"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  var hlsInstance   = null;
+  var shakaInstance = null;
+  var segments      = [];
+  var adBreaks      = 0;
+  var segCount      = 0;
+  var inAd          = false;
+  var sessionId     = 'dev-' + Math.random().toString(36).substr(2, 8);
+  var logEntries    = [];
+
+  var video    = document.getElementById('video');
+  var overlay  = document.getElementById('playerOverlay');
+  var tlSegs   = document.getElementById('timelineSegments');
+  var playhead = document.getElementById('playhead');
+
+  document.getElementById('sessionId').textContent = sessionId;
+
+  // --- Health check ---
+  function checkHealth() {
+    fetch('/health')
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        document.getElementById('healthDot').className = 'health-dot ok';
+        document.getElementById('healthText').textContent = 'Running';
+        var v = (data && (data.version || data.git_hash)) || '';
+        document.getElementById('versionBadge').textContent = v ? 'v' + v : 'online';
+      })
+      .catch(function () {
+        document.getElementById('healthDot').className = 'health-dot err';
+        document.getElementById('healthText').textContent = 'Ritcher not running';
+        document.getElementById('versionBadge').textContent = 'offline';
+        logEvent('Ritcher not running -- start with DEV_MODE=true cargo run', 'red');
+      });
+  }
+  checkHealth();
+  setInterval(checkHealth, 30000);
+
+  // --- Logging ---
+  function logEvent(msg, color) {
+    color = color || 'dim';
+    var now = new Date();
+    var ts = now.toTimeString().substr(0, 8) + '.' + String(now.getMilliseconds()).padStart(3, '0');
+    logEntries.push({ ts: ts, msg: msg, color: color });
+    if (logEntries.length > 200) { logEntries.shift(); }
+    renderLog();
+  }
+  function renderLog() {
+    var el = document.getElementById('eventLog');
+    var html = '';
+    for (var i = 0; i < logEntries.length; i++) {
+      var e = logEntries[i];
+      html += '<div class="log-entry"><span class="log-time">' + e.ts + '</span>'
+            + '<span class="log-msg ' + e.color + '">' + escHtml(e.msg) + '</span></div>';
+    }
+    el.innerHTML = html;
+    el.scrollTop = el.scrollHeight;
+  }
+  function escHtml(s) {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  // --- Stats helpers ---
+  function setState(s, cls) {
+    var el = document.getElementById('statState');
+    el.textContent = s;
+    el.className = 'stat-val' + (cls ? ' ' + cls : '');
+  }
+  function setSegment(url, isAd) {
+    var el = document.getElementById('statSegment');
+    var short = url.split('?')[0].split('/').slice(-2).join('/');
+    el.textContent = short;
+    el.title = url;
+    el.className = 'stat-val' + (isAd ? ' ad' : '');
+  }
+
+  // --- Timeline ---
+  function addSegment(type, dur) {
+    segments.push({ type: type, dur: dur || 2 });
+    renderTimeline();
+  }
+  function renderTimeline() {
+    if (segments.length === 0) { tlSegs.innerHTML = ''; return; }
+    var total = segments.reduce(function (acc, seg) { return acc + seg.dur; }, 0);
+    var html = '';
+    for (var i = 0; i < segments.length; i++) {
+      var seg = segments[i];
+      var pct = (seg.dur / total * 100).toFixed(2);
+      html += '<div class="seg-block ' + seg.type + '" style="flex:' + pct
+            + '" title="' + seg.type + ' (' + seg.dur + 's)"></div>';
+    }
+    tlSegs.innerHTML = html;
+  }
+  function updatePlayhead() {
+    if (segments.length === 0) { return; }
+    var total = segments.reduce(function (acc, seg) { return acc + seg.dur; }, 0);
+    var pct = total > 0 ? Math.min(video.currentTime / total * 100, 100) : 0;
+    playhead.style.left = pct.toFixed(2) + '%';
+  }
+  video.addEventListener('timeupdate', updatePlayhead);
+
+  // --- Video state ---
+  video.addEventListener('playing', function () {
+    overlay.style.display = 'none';
+    setState('playing', 'ok');
+    logEvent('Playing', 'green');
+  });
+  video.addEventListener('pause',   function () { setState('paused'); });
+  video.addEventListener('waiting', function () { setState('buffering'); });
+  video.addEventListener('ended',   function () { setState('ended'); });
+  video.addEventListener('error',   function () {
+    setState('error', 'err');
+    logEvent('Video element error: ' + (video.error ? video.error.message : 'unknown'), 'red');
+  });
+
+  // --- Ad detection ---
+  function isAd(url) { return url.indexOf('/ad/') !== -1; }
+
+  function handleSegment(url, dur) {
+    var ad = isAd(url);
+    segCount++;
+    document.getElementById('statSegs').textContent = segCount;
+    setSegment(url, ad);
+    addSegment(ad ? 'ad' : 'content', dur || 2);
+
+    if (ad && !inAd) {
+      inAd = true;
+      adBreaks++;
+      document.getElementById('statBreaks').textContent = adBreaks;
+      logEvent('Ad break start (break #' + adBreaks + ')', 'orange');
+    } else if (!ad && inAd) {
+      inAd = false;
+      logEvent('Ad break end -- resuming content', 'orange');
+    }
+
+    var tag   = ad ? '[ad]  ' : '[seg] ';
+    var short = url.split('/').slice(-2).join('/').split('?')[0];
+    logEvent(tag + short, ad ? 'orange' : 'blue');
+  }
+
+  // --- Teardown ---
+  function teardown() {
+    if (hlsInstance)   { hlsInstance.destroy();    hlsInstance   = null; }
+    if (shakaInstance) { shakaInstance.destroy();   shakaInstance = null; }
+    segments  = [];
+    adBreaks  = 0;
+    segCount  = 0;
+    inAd      = false;
+    logEntries = [];
+    document.getElementById('statBreaks').textContent = '0';
+    document.getElementById('statSegs').textContent   = '0';
+    document.getElementById('statSegment').textContent = '--';
+    document.getElementById('statSegment').className   = 'stat-val';
+    tlSegs.innerHTML    = '';
+    playhead.style.left = '0%';
+    overlay.style.display = '';
+    overlay.textContent   = 'Loading...';
+    setState('loading');
+    renderLog();
+  }
+
+  // --- Build stream URLs ---
+  function buildUrls() {
+    var base     = window.location.origin;
+    var breaks   = parseInt(document.getElementById('breaks').value, 10) || 2;
+    var interval = document.getElementById('interval').value || '20';
+    var fmt      = document.querySelector('input[name=fmt]:checked').value;
+    sessionId    = 'dev-' + Math.random().toString(36).substr(2, 8);
+    document.getElementById('sessionId').textContent = sessionId;
+
+    if (fmt === 'hls') {
+      var originHls = base + '/demo/playlist.m3u8?breaks=' + breaks + '&interval=' + interval;
+      return { fmt: 'hls', url: base + '/stitch/' + sessionId + '/playlist.m3u8?origin=' + encodeURIComponent(originHls) };
+    }
+    var originDash = base + '/demo/manifest.mpd?breaks=' + breaks + '&interval=' + interval;
+    return { fmt: 'dash', url: base + '/stitch/' + sessionId + '/manifest.mpd?origin=' + encodeURIComponent(originDash) };
+  }
+
+  // --- HLS.js ---
+  function startHls(url) {
+    if (!Hls.isSupported()) {
+      if (video.canPlayType('application/vnd.apple.mpegurl')) {
+        video.src = url;
+        video.play().catch(function () {});
+        logEvent('Native HLS (Safari)', 'green');
+        setState('buffering');
+        return;
+      }
+      logEvent('HLS not supported in this browser', 'red');
+      setState('error', 'err');
+      return;
+    }
+
+    hlsInstance = new Hls({ debug: false });
+    hlsInstance.loadSource(url);
+    hlsInstance.attachMedia(video);
+
+    hlsInstance.on(Hls.Events.MANIFEST_PARSED, function () {
+      logEvent('Manifest parsed', 'green');
+      setState('buffering');
+      video.play().catch(function () {});
+    });
+
+    hlsInstance.on(Hls.Events.FRAG_LOADED, function (evt, data) {
+      handleSegment(data.frag.url || '', data.frag.duration || 2);
+    });
+
+    hlsInstance.on(Hls.Events.ERROR, function (evt, data) {
+      var msg = 'HLS ' + data.type + '/' + data.details;
+      if (data.fatal) { setState('error', 'err'); }
+      logEvent(msg, data.fatal ? 'red' : 'dim');
+    });
+  }
+
+  // --- Shaka Player ---
+  function startShaka(url) {
+    shaka.polyfill.installAll();
+    if (!shaka.Player.isBrowserSupported()) {
+      logEvent('Shaka: browser not supported', 'red');
+      setState('error', 'err');
+      return;
+    }
+
+    shakaInstance = new shaka.Player(video);
+
+    shakaInstance.getNetworkingEngine().registerRequestFilter(function (type, request) {
+      if (type === shaka.net.NetworkingEngine.RequestType.SEGMENT) {
+        var u = request.uris && request.uris[0] ? request.uris[0] : '';
+        if (u) { handleSegment(u, 2); }
+      }
+    });
+
+    shakaInstance.addEventListener('error', function (evt) {
+      var e = evt.detail;
+      logEvent('Shaka error ' + e.code + ': ' + e.message, 'red');
+      setState('error', 'err');
+    });
+
+    shakaInstance.load(url)
+      .then(function () {
+        logEvent('DASH manifest loaded', 'green');
+        setState('buffering');
+        video.play().catch(function () {});
+      })
+      .catch(function (err) {
+        logEvent('Shaka load failed: ' + err.message, 'red');
+        setState('error', 'err');
+      });
+  }
+
+  // --- Play button ---
+  document.getElementById('btnPlay').addEventListener('click', function () {
+    teardown();
+    var ctx = buildUrls();
+    logEvent('Starting ' + ctx.fmt.toUpperCase() + ' -- session ' + sessionId, 'green');
+    logEvent('URL: ' + ctx.url.split('?')[0], 'dim');
+    if (ctx.fmt === 'hls') { startHls(ctx.url); } else { startShaka(ctx.url); }
+  });
+
+}());
+</script>
+</body>
+</html>

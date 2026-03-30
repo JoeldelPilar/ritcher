@@ -101,9 +101,10 @@ impl Config {
             env::var("BASE_URL").map_err(|_| "BASE_URL is required in production")?
         };
 
-        // Origin URL: required in prod, defaults to example.com in dev
+        // Origin URL: required in prod, defaults to own demo endpoint in dev
         let origin_url = if is_dev {
-            env::var("ORIGIN_URL").unwrap_or_else(|_| "https://example.com".to_string())
+            env::var("ORIGIN_URL")
+                .unwrap_or_else(|_| format!("http://localhost:{}/demo/playlist.m3u8", port))
         } else {
             env::var("ORIGIN_URL").map_err(|_| "ORIGIN_URL is required in production")?
         };
@@ -284,7 +285,10 @@ mod tests {
                 assert!(config.is_dev);
                 assert_eq!(config.port, 3000);
                 assert_eq!(config.base_url, "http://localhost:3000");
-                assert_eq!(config.origin_url, "https://example.com");
+                assert_eq!(
+                    config.origin_url,
+                    "http://localhost:3000/demo/playlist.m3u8"
+                );
                 assert_eq!(config.stitching_mode, StitchingMode::Ssai);
                 assert_eq!(config.ad_provider_type, AdProviderType::Static);
                 assert_eq!(config.session_store, SessionStoreType::Memory);

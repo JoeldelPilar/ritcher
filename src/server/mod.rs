@@ -140,6 +140,8 @@ pub async fn build_router_with_token(config: Config, cancel: CancellationToken) 
             "/demo/ll-hls/playlist.m3u8",
             get(handlers::demo::serve_demo_ll_hls_playlist),
         )
+        // Dev UI: dashboard for testing stitcher (dev mode only, returns 404 in prod)
+        .route("/dev", get(handlers::dev::serve_dev_ui))
         // Stitcher endpoints
         .route(
             "/stitch/{session_id}/playlist.m3u8",
@@ -219,6 +221,7 @@ pub async fn start(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         "  Demo:    {}/stitch/demo/playlist.m3u8?origin={}/demo/playlist.m3u8",
         base_url, base_url
     );
+    info!("  Dev UI:  {}/dev", base_url);
 
     // Start serving with graceful shutdown.
     // The shutdown future cancels background tasks first, then signals the

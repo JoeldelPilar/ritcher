@@ -741,6 +741,90 @@ async fn rate_limiting_blocks_excessive_requests() {
     );
 }
 
+/// GET /dev returns 200 with HTML in dev mode and contains expected markers.
+#[tokio::test]
+async fn dev_ui_returns_200_with_html_in_dev_mode() {
+    let addr = start_test_server().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("http://{}/dev", addr))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.headers().get("content-type").unwrap(),
+        "text/html; charset=utf-8"
+    );
+
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("Ritcher Dev"),
+        "Dev UI must contain 'Ritcher Dev' title, got:\n{}",
+        &body[..200]
+    );
+    assert!(
+        body.contains("hls.js"),
+        "Dev UI must reference hls.js, got:\n{}",
+        &body[..200]
+    );
+    assert!(
+        body.contains("<html"),
+        "Response must be valid HTML, got:\n{}",
+        &body[..200]
+    );
+}
+
+/// GET /dev returns 404 when not in dev mode (prod guard).
+#[tokio::test]
+async fn dev_ui_returns_404_in_prod_mode() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("Failed to bind test server");
+    let addr = listener.local_addr().unwrap();
+
+    let config = Config {
+        port: 0,
+        base_url: format!("http://{}", addr),
+        origin_url: format!("http://{}/demo/playlist.m3u8", addr),
+        is_dev: false, // prod mode
+        stitching_mode: ritcher::config::StitchingMode::Ssai,
+        ad_provider_type: AdProviderType::Static,
+        ad_source_url: "https://hls.src.tedm.io/content/ts_h264_480p_1s".to_string(),
+        ad_segment_duration: 1.0,
+        vast_endpoint: None,
+        slate_url: None,
+        slate_segment_duration: 1.0,
+        session_store: SessionStoreType::Memory,
+        valkey_url: None,
+        session_ttl_secs: 300,
+        rate_limit_rpm: 0,
+        demo_ad_base_url: None,
+        origin_timeout_secs: 30,
+        manifest_cache_ttl_ms: 2000,
+    };
+
+    let app = ritcher::server::build_router(config).await;
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{}/dev", addr))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        404,
+        "GET /dev must return 404 when not in dev mode"
+    );
+}
+
 /// Session ID containing XSS payload must return 400 and must NOT reflect
 /// the payload in the response body.
 #[tokio::test]

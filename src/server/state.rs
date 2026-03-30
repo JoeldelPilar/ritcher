@@ -142,7 +142,7 @@ impl AppState {
                 let base_url = config
                     .demo_ad_base_url
                     .as_deref()
-                    .unwrap_or("http://localhost:3333/ads");
+                    .unwrap_or("https://hls.src.tedm.io/content/ts_h264_480p_1s");
                 info!(
                     "Ad provider: Demo ({} creatives at {})",
                     DemoAdProvider::NUM_CREATIVES,
