@@ -81,6 +81,7 @@ fn hex_val(b: u8) -> Option<u8> {
 pub async fn serve_segment(
     session_id: ValidatedSessionId,
     origin: ValidatedOrigin,
+    // Path tuple required by axum routing; session_id already validated above via ValidatedSessionId.
     Path((_session_id_dup, segment_path)): Path<(String, String)>,
     State(state): State<AppState>,
 ) -> Result<Response> {
@@ -96,7 +97,7 @@ pub async fn serve_segment(
 
     // User-supplied `?origin=` already passed SSRF validation in the
     // extractor; fall back to the operator-configured origin if absent.
-    let origin_base: &str = origin.as_str().unwrap_or(state.config.origin_url.as_str());
+    let origin_base: &str = origin.resolve(&state.config.origin_url);
 
     let segment_url = format!("{}/{}", origin_base, segment_path);
 

@@ -24,6 +24,7 @@ use tracing::info;
 /// Uses [`fetch_with_retry`] for fault-tolerant HTTP fetching.
 pub async fn serve_ad(
     session_id: ValidatedSessionId,
+    // Path tuple required by axum routing; session_id already validated above via ValidatedSessionId.
     Path((_session_id_dup, ad_name)): Path<(String, String)>,
     State(state): State<AppState>,
 ) -> Result<Response> {

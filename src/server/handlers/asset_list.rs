@@ -111,6 +111,7 @@ fn validate_dur_param(value: &str) -> crate::error::Result<f32> {
 /// - `dur` -- requested ad break duration in seconds (default: 30.0, max: 600.0)
 pub async fn serve_asset_list(
     session_id: ValidatedSessionId,
+    // Path tuple required by axum routing; session_id already validated above via ValidatedSessionId.
     Path((_session_id_dup, break_id)): Path<(String, String)>,
     Query(params): Query<HashMap<String, String>>,
     State(state): State<AppState>,

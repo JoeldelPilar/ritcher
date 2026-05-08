@@ -12,9 +12,16 @@
 //! `validate_session_id(&id)?` and `validate_origin_url(origin)?` itself.
 //! A new endpoint that forgot the call shipped an SSRF or character-set
 //! bypass. Lifting validation to extractors makes the validation step a
-//! declarative parameter — the compiler enforces nothing, but a code reviewer
-//! can grep `git grep -E 'validate_origin_url|validate_session_id' src/server/handlers/`
-//! and expect zero hits.
+//! declarative parameter. The compiler enforces non-construction outside
+//! this module — the wrapped fields are private, and we deliberately do
+//! not derive `Default`, `Deserialize`, or `From<Url>` / `From<String>`,
+//! so the only path to a `ValidatedOrigin` or `ValidatedSessionId` is
+//! through the [`FromRequestParts`] impls that run validation. Completeness
+//! — that every handler taking an origin or session ID actually uses these
+//! extractors rather than raw `Query` / `Path` — is enforced by reviewers
+//! via grep, not by the type system. A new endpoint should pass
+//! `git grep -E 'validate_origin_url|validate_session_id' src/server/handlers/`
+//! with zero hits.
 //!
 //! ## Open TOCTOU window (out of scope)
 //!
@@ -66,6 +73,11 @@ where
         // the handler's own `Path` extractor (axum's `Path` is documented as
         // not safe to use twice in one handler). `RawPathParams` is iterable
         // by reference and so can be re-read freely.
+        //
+        // `RawPathParams` returns percent-decoded UTF-8 bytes; we rely on the
+        // `validate_session_id` call below to reject anything outside ASCII
+        // alphanumeric + `[-_]`, which closes off path-traversal and Unicode
+        // confusable attacks at the type-system boundary.
         let raw = RawPathParams::from_request_parts(parts, state)
             .await
             .map_err(|_| {
@@ -123,6 +135,22 @@ impl ValidatedOrigin {
     pub fn into_inner(self) -> Option<Url> {
         self.0
     }
+
+    /// Returns the validated origin URL if present; otherwise the fallback.
+    ///
+    /// The fallback is operator-trusted (configured at startup via
+    /// `ORIGIN_URL`) and therefore not re-validated here. Callers pass
+    /// `&state.config.origin_url` so the per-request origin and the static
+    /// configured origin are unified into a single `&str` without each
+    /// handler open-coding the `Option::unwrap_or` dance.
+    ///
+    /// Returns `&str` rather than `&Url` because `config.origin_url` is
+    /// stored as `String` and all current callers (HLS, DASH, segment
+    /// proxy) immediately pass the value to `reqwest::Client::get`, which
+    /// itself takes `&str`/`IntoUrl`.
+    pub fn resolve<'a>(&'a self, fallback: &'a str) -> &'a str {
+        self.0.as_ref().map(Url::as_str).unwrap_or(fallback)
+    }
 }
 
 impl<S> FromRequestParts<S> for ValidatedOrigin
@@ -136,10 +164,22 @@ where
         // origin. Otherwise extract the `origin` field and validate it.
         // We deserialise into a HashMap so other query params (LL-HLS, dur,
         // track) still flow to handlers via their own Query<HashMap> extractor.
-        let Ok(Query(params)) =
-            Query::<HashMap<String, String>>::from_request_parts(parts, state).await
-        else {
-            return Ok(ValidatedOrigin(None));
+        let params = match Query::<HashMap<String, String>>::from_request_parts(parts, state).await
+        {
+            Ok(Query(p)) => p,
+            Err(e) => {
+                // Malformed query strings (duplicate keys with conflicting
+                // serde shapes, invalid percent-encoding, etc.) fail
+                // extraction. Treat as "no origin provided" rather than 400 —
+                // the handler will fall back to the configured origin. Logged
+                // at debug so operators chasing a missing-origin report can
+                // distinguish "never sent" from "sent but unparseable".
+                tracing::debug!(
+                    "Query extraction failed during ValidatedOrigin extract; treating as no origin: {}",
+                    e
+                );
+                return Ok(ValidatedOrigin(None));
+            }
         };
 
         let Some(raw) = params.get("origin") else {

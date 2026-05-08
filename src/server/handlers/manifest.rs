@@ -35,7 +35,7 @@ pub async fn serve_manifest(
 
     // User-supplied `?origin=` already passed SSRF validation in the
     // extractor; fall back to the operator-configured origin if absent.
-    let origin_url: &str = origin.as_str().unwrap_or(state.config.origin_url.as_str());
+    let origin_url: &str = origin.resolve(&state.config.origin_url);
 
     info!("Fetching MPD from origin: {}", origin_url);
 
