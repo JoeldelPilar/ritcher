@@ -3,7 +3,7 @@ use crate::{
     error::Result,
     http_retry::{RetryConfig, fetch_with_retry},
     metrics,
-    server::{state::AppState, url_validation::validate_session_id},
+    server::{extractors::ValidatedSessionId, state::AppState},
 };
 use axum::{
     body::Body,
@@ -23,10 +23,11 @@ use tracing::info;
 ///
 /// Uses [`fetch_with_retry`] for fault-tolerant HTTP fetching.
 pub async fn serve_ad(
-    Path((session_id, ad_name)): Path<(String, String)>,
+    session_id: ValidatedSessionId,
+    Path((_session_id_dup, ad_name)): Path<(String, String)>,
     State(state): State<AppState>,
 ) -> Result<Response> {
-    validate_session_id(&session_id)?;
+    let session_id = session_id.into_inner();
     let start = Instant::now();
     info!("Serving ad: {} for session: {}", ad_name, session_id);
 

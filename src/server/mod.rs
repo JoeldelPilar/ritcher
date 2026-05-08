@@ -1,4 +1,5 @@
 pub(crate) mod dns_resolver;
+pub mod extractors;
 pub mod handlers;
 pub mod rate_limit;
 pub mod state;
