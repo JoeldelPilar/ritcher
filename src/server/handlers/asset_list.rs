@@ -20,7 +20,7 @@ use crate::ad::vast::Verification;
 use crate::{
     error::Result,
     metrics,
-    server::{state::AppState, url_validation::validate_session_id},
+    server::{extractors::ValidatedSessionId, state::AppState},
 };
 use axum::{
     Json,
@@ -110,11 +110,13 @@ fn validate_dur_param(value: &str) -> crate::error::Result<f32> {
 /// Query params:
 /// - `dur` -- requested ad break duration in seconds (default: 30.0, max: 600.0)
 pub async fn serve_asset_list(
-    Path((session_id, break_id)): Path<(String, String)>,
+    session_id: ValidatedSessionId,
+    // Path tuple required by axum routing; session_id already validated above via ValidatedSessionId.
+    Path((_session_id_dup, break_id)): Path<(String, String)>,
     Query(params): Query<HashMap<String, String>>,
     State(state): State<AppState>,
 ) -> Result<Response> {
-    validate_session_id(&session_id)?;
+    let session_id = session_id.into_inner();
     let start = Instant::now();
     info!(
         "Serving asset-list for session: {} break: {}",

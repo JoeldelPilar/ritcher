@@ -3,17 +3,16 @@ use crate::{
     http_retry::{RetryConfig, fetch_with_retry},
     metrics,
     server::{
+        extractors::{ValidatedOrigin, ValidatedSessionId},
         state::AppState,
-        url_validation::{validate_origin_url, validate_session_id},
     },
 };
 use axum::{
     body::Body,
-    extract::{Path, Query, State},
+    extract::{Path, State},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
-use std::collections::HashMap;
 use std::time::Instant;
 use tracing::{info, warn};
 
@@ -80,11 +79,13 @@ fn hex_val(b: u8) -> Option<u8> {
 /// the segment from the origin CDN to the client without buffering.
 /// Uses [`fetch_with_retry`] for fault-tolerant HTTP fetching.
 pub async fn serve_segment(
-    Path((session_id, segment_path)): Path<(String, String)>,
-    Query(params): Query<HashMap<String, String>>,
+    session_id: ValidatedSessionId,
+    origin: ValidatedOrigin,
+    // Path tuple required by axum routing; session_id already validated above via ValidatedSessionId.
+    Path((_session_id_dup, segment_path)): Path<(String, String)>,
     State(state): State<AppState>,
 ) -> Result<Response> {
-    validate_session_id(&session_id)?;
+    let session_id = session_id.into_inner();
     let start = Instant::now();
     info!(
         "Serving segment: {} for session: {}",
@@ -94,14 +95,9 @@ pub async fn serve_segment(
     // Block path traversal attempts (e.g. "../../etc/passwd")
     validate_segment_path(&segment_path)?;
 
-    // Get origin base URL from query params or fallback to config.
-    // Validate user-supplied origin against SSRF attack vectors.
-    let origin_base: &str = if let Some(origin) = params.get("origin") {
-        validate_origin_url(origin)?;
-        origin.as_str()
-    } else {
-        &state.config.origin_url
-    };
+    // User-supplied `?origin=` already passed SSRF validation in the
+    // extractor; fall back to the operator-configured origin if absent.
+    let origin_base: &str = origin.resolve(&state.config.origin_url);
 
     let segment_url = format!("{}/{}", origin_base, segment_path);
 

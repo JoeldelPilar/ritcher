@@ -5,17 +5,16 @@ use crate::{
     metrics,
     server::{
         MAX_MANIFEST_SIZE,
+        extractors::{ValidatedOrigin, ValidatedSessionId},
         state::AppState,
-        url_validation::{validate_origin_url, validate_session_id},
     },
 };
 use axum::{
-    extract::{Path, Query, State},
+    extract::State,
     http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
 use futures_util::StreamExt;
-use std::collections::HashMap;
 use std::time::Instant;
 use tracing::info;
 
@@ -26,22 +25,17 @@ use tracing::info;
 ///
 /// Returns `application/dash+xml` with HTTP 200 on success.
 pub async fn serve_manifest(
-    Path(session_id): Path<String>,
-    Query(params): Query<HashMap<String, String>>,
+    session_id: ValidatedSessionId,
+    origin: ValidatedOrigin,
     State(state): State<AppState>,
 ) -> Result<Response> {
-    validate_session_id(&session_id)?;
+    let session_id = session_id.into_inner();
     let start = Instant::now();
     info!("Serving DASH manifest for session: {}", session_id);
 
-    // Get origin URL from query params or fallback to config.
-    // Validate user-supplied origin against SSRF attack vectors.
-    let origin_url: &str = if let Some(origin) = params.get("origin") {
-        validate_origin_url(origin)?;
-        origin.as_str()
-    } else {
-        &state.config.origin_url
-    };
+    // User-supplied `?origin=` already passed SSRF validation in the
+    // extractor; fall back to the operator-configured origin if absent.
+    let origin_url: &str = origin.resolve(&state.config.origin_url);
 
     info!("Fetching MPD from origin: {}", origin_url);
 
