@@ -1,15 +1,12 @@
-use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
+use tracing::warn;
 
-#[cfg(feature = "valkey")]
-use tracing::{error, info};
+use super::memory::MemoryStore;
+use super::store::SessionStore;
 
-#[cfg(feature = "valkey")]
-use redis::aio::ConnectionManager;
-
-/// Session data stored for each active session
+/// Session data stored for each active session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub session_id: String,
@@ -20,7 +17,7 @@ pub struct Session {
     pub last_accessed: SystemTime,
 }
 
-/// Serde helper: SystemTime ↔ u64 epoch seconds
+/// Serde helper: SystemTime ↔ u64 epoch seconds.
 mod epoch_secs {
     use serde::{Deserialize, Deserializer, Serializer};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -45,250 +42,126 @@ mod epoch_secs {
     }
 }
 
-/// Internal storage backend
-#[derive(Clone)]
-enum Backend {
-    Memory {
-        sessions: Arc<DashMap<String, Session>>,
-    },
-    #[cfg(feature = "valkey")]
-    Valkey {
-        conn: ConnectionManager,
-        key_prefix: String,
-    },
-}
-
-/// Session manager — same public API regardless of backend
+/// Session manager — the public API for session lifecycle.
+///
+/// The manager holds an `Arc<dyn SessionStore>` so callers don't need to
+/// know whether sessions live in process memory or in Valkey. Construct
+/// with [`SessionManager::new_memory`] or [`SessionManager::new_valkey`]
+/// (the latter requires the `valkey` cargo feature).
+///
+/// `Clone` is cheap: cloning bumps the `Arc` refcount on the store.
 #[derive(Clone)]
 pub struct SessionManager {
-    backend: Backend,
+    store: Arc<dyn SessionStore>,
     ttl: Duration,
 }
 
 impl SessionManager {
-    /// Create an in-memory session manager (default)
+    /// Internal constructor for tests; external callers must use `new_memory`
+    /// or `new_valkey`.
+    pub(crate) fn from_store(store: Arc<dyn SessionStore>, ttl: Duration) -> Self {
+        Self { store, ttl }
+    }
+
+    /// Create an in-memory session manager (default).
     pub fn new_memory(ttl: Duration) -> Self {
-        Self {
-            backend: Backend::Memory {
-                sessions: Arc::new(DashMap::new()),
-            },
-            ttl,
-        }
+        Self::from_store(Arc::new(MemoryStore::new()), ttl)
     }
 
-    /// Create a Valkey-backed session manager
-    #[cfg(feature = "valkey")]
-    pub async fn new_valkey(url: &str, ttl: Duration) -> Result<Self, redis::RedisError> {
-        let client = redis::Client::open(url)?;
-        let conn = ConnectionManager::new(client).await?;
-        info!("Connected to Valkey at {}", url);
-        Ok(Self {
-            backend: Backend::Valkey {
-                conn,
-                key_prefix: "ritcher:session".to_string(),
-            },
-            ttl,
-        })
-    }
+    // `new_valkey` lives in [`super::valkey`] as a feature-gated inherent
+    // impl on [`SessionManager`], so the `valkey` cargo feature does not
+    // leak into this file.
 
-    /// Get or create a session
+    /// Get or create a session.
+    ///
+    /// If a session with `session_id` already exists, the existing record is
+    /// returned unchanged (the supplied `origin_url` is ignored — this is the
+    /// idempotent path covered by `get_or_create_returns_existing_session`).
     pub async fn get_or_create(&self, session_id: String, origin_url: String) -> Session {
-        match &self.backend {
-            Backend::Memory { sessions } => sessions
-                .entry(session_id.clone())
-                .or_insert_with(|| {
-                    let now = SystemTime::now();
-                    Session {
-                        session_id: session_id.clone(),
-                        origin_url,
-                        created_at: now,
-                        last_accessed: now,
-                    }
-                })
-                .clone(),
-            #[cfg(feature = "valkey")]
-            Backend::Valkey { conn, key_prefix } => {
-                let key = format!("{}:{}", key_prefix, session_id);
-                let mut conn = conn.clone();
-                // Try to get existing session
-                if let Ok(Some(json)) = redis::cmd("GET")
-                    .arg(&key)
-                    .query_async::<Option<String>>(&mut conn)
-                    .await
-                {
-                    if let Ok(session) = serde_json::from_str::<Session>(&json) {
-                        return session;
-                    }
-                }
-                // Create new session
-                let now = SystemTime::now();
-                let session = Session {
-                    session_id: session_id.clone(),
-                    origin_url,
-                    created_at: now,
-                    last_accessed: now,
-                };
-                if let Ok(json) = serde_json::to_string(&session) {
-                    let ttl_secs = self.ttl.as_secs();
-                    if let Err(e) = redis::cmd("SET")
-                        .arg(&key)
-                        .arg(&json)
-                        .arg("EX")
-                        .arg(ttl_secs)
-                        .query_async::<()>(&mut conn)
-                        .await
-                    {
-                        error!("Failed to store session in Valkey: {}", e);
-                    }
-                }
-                session
+        let now = SystemTime::now();
+        let candidate = Session {
+            session_id: session_id.clone(),
+            origin_url,
+            created_at: now,
+            last_accessed: now,
+        };
+        match self
+            .store
+            .insert_if_absent(candidate.clone(), self.ttl)
+            .await
+        {
+            Ok(session) => session,
+            Err(e) => {
+                // Backend failure: fall back to the candidate so the caller
+                // still gets a usable session record. The next request will
+                // retry the store and either hit the existing record or
+                // re-insert.
+                warn!("session store insert_if_absent failed: {}", e);
+                candidate
             }
         }
     }
 
-    /// Update last accessed time for a session
+    /// Update last accessed time for a session.
+    ///
+    /// Memory backends mutate `last_accessed`; Valkey backends refresh native
+    /// TTL via `EXPIRE` without rewriting the JSON. Either way, the session's
+    /// effective liveness window is extended by `ttl`.
     pub async fn touch(&self, session_id: &str) {
-        match &self.backend {
-            Backend::Memory { sessions } => {
-                if let Some(mut session) = sessions.get_mut(session_id) {
-                    session.last_accessed = SystemTime::now();
-                }
-            }
-            #[cfg(feature = "valkey")]
-            Backend::Valkey { conn, key_prefix } => {
-                let key = format!("{}:{}", key_prefix, session_id);
-                let mut conn = conn.clone();
-                // Session TTL is configured in seconds (default 300); u64->i64 is safe
-                // for any realistic TTL value (max ~292 billion years).
-                #[allow(clippy::cast_possible_truncation)]
-                let ttl_secs = self.ttl.as_secs() as i64;
-                // Use EXPIRE to refresh TTL in a single O(1) command instead of
-                // GET → deserialize → modify → serialize → SET.
-                // Trade-off: last_accessed is not updated in the stored JSON, but
-                // the key's TTL accurately reflects session liveness. The field is
-                // only used for diagnostics, not for eviction logic.
-                if let Err(e) = redis::cmd("EXPIRE")
-                    .arg(&key)
-                    .arg(ttl_secs)
-                    .query_async::<i32>(&mut conn)
-                    .await
-                {
-                    error!("Valkey EXPIRE failed in touch: {}", e);
-                }
-            }
+        if let Err(e) = self.store.touch(session_id, self.ttl).await {
+            warn!("session store touch failed for {}: {}", session_id, e);
         }
     }
 
-    /// Get a session by ID
+    /// Get a session by ID.
     pub async fn get(&self, session_id: &str) -> Option<Session> {
-        match &self.backend {
-            Backend::Memory { sessions } => sessions.get(session_id).map(|s| s.clone()),
-            #[cfg(feature = "valkey")]
-            Backend::Valkey { conn, key_prefix } => {
-                let key = format!("{}:{}", key_prefix, session_id);
-                let mut conn = conn.clone();
-                match redis::cmd("GET")
-                    .arg(&key)
-                    .query_async::<Option<String>>(&mut conn)
-                    .await
-                {
-                    Ok(Some(json)) => serde_json::from_str(&json).ok(),
-                    Ok(None) => None,
-                    Err(e) => {
-                        error!("Valkey GET failed: {}", e);
-                        None
-                    }
-                }
+        match self.store.get(session_id).await {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("session store get failed for {}: {}", session_id, e);
+                None
             }
         }
     }
 
-    /// Remove expired sessions (no-op for Valkey — TTL is native)
+    /// Remove expired sessions (no-op for backends with native TTL).
     pub async fn cleanup_expired(&self) {
-        match &self.backend {
-            Backend::Memory { sessions } => {
-                let now = SystemTime::now();
-                sessions.retain(|_, session| {
-                    if let Ok(elapsed) = now.duration_since(session.last_accessed) {
-                        elapsed < self.ttl
-                    } else {
-                        true
-                    }
-                });
-            }
-            #[cfg(feature = "valkey")]
-            Backend::Valkey { .. } => {
-                // Valkey handles TTL natively via EXPIRE — nothing to do
-            }
+        if let Err(e) = self
+            .store
+            .cleanup_expired(self.ttl, SystemTime::now())
+            .await
+        {
+            warn!("session store cleanup_expired failed: {}", e);
         }
     }
 
-    /// Get the count of active sessions
+    /// Get the count of active sessions.
+    ///
+    /// **Approximated on the Valkey backend**: the count is collected via a
+    /// cursor-based `SCAN` walk and is not exact under concurrent
+    /// inserts/expirations during the walk. The in-memory backend returns
+    /// an exact count. Either way, this is intended for diagnostics
+    /// (e.g. the `/health` endpoint), not for correctness-sensitive logic.
+    ///
+    /// See [`SessionStore::approx_count`](super::store::SessionStore::approx_count)
+    /// for backend specifics.
     pub async fn session_count(&self) -> usize {
-        match &self.backend {
-            Backend::Memory { sessions } => sessions.len(),
-            #[cfg(feature = "valkey")]
-            Backend::Valkey { conn, key_prefix } => {
-                let pattern = format!("{}:*", key_prefix);
-                let mut conn = conn.clone();
-                // Use SCAN instead of KEYS to avoid blocking Valkey.
-                // SCAN is cursor-based and yields control between batches.
-                let mut cursor: u64 = 0;
-                let mut count: usize = 0;
-                loop {
-                    let result: (u64, Vec<String>) = match redis::cmd("SCAN")
-                        .arg(cursor)
-                        .arg("MATCH")
-                        .arg(&pattern)
-                        .arg("COUNT")
-                        .arg(100)
-                        .query_async(&mut conn)
-                        .await
-                    {
-                        Ok(r) => r,
-                        Err(e) => {
-                            error!("Valkey SCAN failed in session_count: {}", e);
-                            return 0;
-                        }
-                    };
-                    count += result.1.len();
-                    cursor = result.0;
-                    if cursor == 0 {
-                        break;
-                    }
-                }
-                count
+        match self.store.approx_count().await {
+            Ok(n) => n,
+            Err(e) => {
+                warn!("session store approx_count failed: {}", e);
+                0
             }
         }
     }
 
-    /// Remove a specific session
+    /// Remove a specific session, returning the removed record if it existed.
     pub async fn remove(&self, session_id: &str) -> Option<Session> {
-        match &self.backend {
-            Backend::Memory { sessions } => sessions.remove(session_id).map(|(_, session)| session),
-            #[cfg(feature = "valkey")]
-            Backend::Valkey { conn, key_prefix } => {
-                let key = format!("{}:{}", key_prefix, session_id);
-                let mut conn = conn.clone();
-                // GET then DEL
-                let json: Option<String> =
-                    match redis::cmd("GET").arg(&key).query_async(&mut conn).await {
-                        Ok(v) => v,
-                        Err(e) => {
-                            error!("Valkey GET failed in remove: {}", e);
-                            return None;
-                        }
-                    };
-                if json.is_some() {
-                    if let Err(e) = redis::cmd("DEL")
-                        .arg(&key)
-                        .query_async::<()>(&mut conn)
-                        .await
-                    {
-                        error!("Valkey DEL failed in remove: {}", e);
-                    }
-                }
-                json.and_then(|j| serde_json::from_str(&j).ok())
+        match self.store.remove(session_id).await {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("session store remove failed for {}: {}", session_id, e);
+                None
             }
         }
     }
@@ -297,6 +170,101 @@ impl SessionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::store::{SessionError, SessionStore};
+    use async_trait::async_trait;
+    use std::sync::Mutex;
+
+    /// Minimal in-process fake used to demonstrate that the store seam
+    /// makes test doubles trivial. Backed by a `Mutex<Vec<_>>` so we can
+    /// also count call interactions.
+    struct FakeSessionStore {
+        sessions: Mutex<Vec<Session>>,
+        get_calls: Mutex<usize>,
+    }
+
+    impl FakeSessionStore {
+        fn new() -> Self {
+            Self {
+                sessions: Mutex::new(Vec::new()),
+                get_calls: Mutex::new(0),
+            }
+        }
+
+        fn get_call_count(&self) -> usize {
+            *self.get_calls.lock().unwrap()
+        }
+    }
+
+    #[async_trait]
+    impl SessionStore for FakeSessionStore {
+        async fn get(&self, session_id: &str) -> Result<Option<Session>, SessionError> {
+            *self.get_calls.lock().unwrap() += 1;
+            let sessions = self.sessions.lock().unwrap();
+            Ok(sessions
+                .iter()
+                .find(|s| s.session_id == session_id)
+                .cloned())
+        }
+
+        async fn insert_if_absent(
+            &self,
+            session: Session,
+            _ttl: Duration,
+        ) -> Result<Session, SessionError> {
+            let resolved = {
+                let mut sessions = self.sessions.lock().unwrap();
+                if let Some(existing) = sessions.iter().find(|s| s.session_id == session.session_id)
+                {
+                    existing.clone()
+                } else {
+                    sessions.push(session.clone());
+                    session
+                }
+            };
+            Ok(resolved)
+        }
+
+        async fn touch(&self, session_id: &str, _ttl: Duration) -> Result<(), SessionError> {
+            {
+                let mut sessions = self.sessions.lock().unwrap();
+                if let Some(s) = sessions.iter_mut().find(|s| s.session_id == session_id) {
+                    s.last_accessed = SystemTime::now();
+                }
+            }
+            Ok(())
+        }
+
+        async fn remove(&self, session_id: &str) -> Result<Option<Session>, SessionError> {
+            let removed = {
+                let mut sessions = self.sessions.lock().unwrap();
+                sessions
+                    .iter()
+                    .position(|s| s.session_id == session_id)
+                    .map(|pos| sessions.remove(pos))
+            };
+            Ok(removed)
+        }
+
+        async fn cleanup_expired(
+            &self,
+            ttl: Duration,
+            now: SystemTime,
+        ) -> Result<(), SessionError> {
+            {
+                let mut sessions = self.sessions.lock().unwrap();
+                sessions.retain(|s| {
+                    now.duration_since(s.last_accessed)
+                        .map(|elapsed| elapsed < ttl)
+                        .unwrap_or(true)
+                });
+            }
+            Ok(())
+        }
+
+        async fn approx_count(&self) -> Result<usize, SessionError> {
+            Ok(self.sessions.lock().unwrap().len())
+        }
+    }
 
     #[tokio::test]
     async fn test_session_creation() {
@@ -390,5 +358,30 @@ mod tests {
             0,
             "Stale session should be removed"
         );
+    }
+
+    #[tokio::test]
+    async fn fake_store_drives_manager() {
+        // Demonstrates that the trait seam makes test doubles trivial:
+        // no DashMap, no Valkey, no feature flags — just a plain Mutex<Vec<_>>.
+        let fake = Arc::new(FakeSessionStore::new());
+        let manager = SessionManager::from_store(fake.clone(), Duration::from_secs(60));
+
+        manager
+            .get_or_create("fake".to_string(), "https://fake.test".to_string())
+            .await;
+        assert_eq!(manager.session_count().await, 1);
+
+        let s = manager.get("fake").await.expect("should be present");
+        assert_eq!(s.origin_url, "https://fake.test");
+        assert_eq!(
+            fake.get_call_count(),
+            1,
+            "exactly one underlying GET should have been issued"
+        );
+
+        let removed = manager.remove("fake").await;
+        assert!(removed.is_some());
+        assert_eq!(manager.session_count().await, 0);
     }
 }

@@ -57,6 +57,8 @@ pub async fn build_router_with_token(config: Config, cancel: CancellationToken) 
     let cleanup_sessions = state.sessions.clone();
     let cancel_sessions = cancel.clone();
     tokio::spawn(async move {
+        // invariant: cleanup_interval should be ≤ session TTL / 2
+        // (otherwise expired sessions linger up to one interval past expiry on the memory backend)
         let mut interval = tokio::time::interval(Duration::from_secs(60));
         loop {
             tokio::select! {
