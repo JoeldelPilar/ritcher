@@ -57,11 +57,9 @@ pub struct SessionManager {
 }
 
 impl SessionManager {
-    /// Construct a manager from any [`SessionStore`] implementation.
-    ///
-    /// Useful for tests (see `FakeSessionStore` in the test module) and
-    /// for the constructors below.
-    pub fn from_store(store: Arc<dyn SessionStore>, ttl: Duration) -> Self {
+    /// Internal constructor for tests; external callers must use `new_memory`
+    /// or `new_valkey`.
+    pub(crate) fn from_store(store: Arc<dyn SessionStore>, ttl: Duration) -> Self {
         Self { store, ttl }
     }
 
@@ -139,8 +137,14 @@ impl SessionManager {
 
     /// Get the count of active sessions.
     ///
-    /// On distributed backends this is a `SCAN`-based approximation; see
-    /// [`SessionStore::approx_count`](super::store::SessionStore::approx_count).
+    /// **Approximated on the Valkey backend**: the count is collected via a
+    /// cursor-based `SCAN` walk and is not exact under concurrent
+    /// inserts/expirations during the walk. The in-memory backend returns
+    /// an exact count. Either way, this is intended for diagnostics
+    /// (e.g. the `/health` endpoint), not for correctness-sensitive logic.
+    ///
+    /// See [`SessionStore::approx_count`](super::store::SessionStore::approx_count)
+    /// for backend specifics.
     pub async fn session_count(&self) -> usize {
         match self.store.approx_count().await {
             Ok(n) => n,

@@ -9,6 +9,8 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub struct HealthResponse {
     pub status: &'static str,
     pub version: &'static str,
+    /// Approximation on Valkey backend (SCAN-based, not exact under concurrent
+    /// writes); exact on the in-memory backend. Diagnostics only.
     pub active_sessions: usize,
     pub uptime_seconds: u64,
 }

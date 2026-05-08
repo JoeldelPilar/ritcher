@@ -126,10 +126,9 @@ impl SessionStore for ValkeyStore {
     async fn touch(&self, session_id: &str, ttl: Duration) -> Result<(), SessionError> {
         let key = self.key_for(session_id);
         let mut conn = self.conn.clone();
-        // Session TTL is configured in seconds (default 300); u64 -> i64 is
-        // safe for any realistic TTL value (max ~292 billion years).
-        #[allow(clippy::cast_possible_truncation)]
-        let ttl_secs = ttl.as_secs() as i64;
+        // Session TTL is configured in seconds (default 300); saturate at
+        // i64::MAX for any pathological u64 input rather than wrapping.
+        let ttl_secs = i64::try_from(ttl.as_secs()).unwrap_or(i64::MAX);
         // EXPIRE is O(1). We deliberately do not GET → mutate → SET to keep
         // the hot path single-roundtrip; `last_accessed` in stored JSON is
         // diagnostic only.

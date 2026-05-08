@@ -66,6 +66,10 @@ pub trait SessionStore: Send + Sync {
     ///
     /// The returned [`Session`] is the one that ultimately won — either
     /// `session` itself (on insert) or the existing record (on hit).
+    ///
+    /// Implementations may resolve concurrent racers via last-writer-wins;
+    /// callers must not rely on strict CAS semantics. See the per-impl docs
+    /// for atomicity guarantees.
     async fn insert_if_absent(
         &self,
         session: Session,
