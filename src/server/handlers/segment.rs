@@ -1,6 +1,5 @@
 use crate::{
     error::Result,
-    http_retry::{RetryConfig, fetch_with_retry},
     metrics,
     server::{
         extractors::{ValidatedOrigin, ValidatedSessionId},
@@ -77,7 +76,8 @@ fn hex_val(b: u8) -> Option<u8> {
 ///
 /// Validates the segment path against path-traversal attacks, then streams
 /// the segment from the origin CDN to the client without buffering.
-/// Uses [`fetch_with_retry`] for fault-tolerant HTTP fetching.
+/// Uses the shared `default_retry_policy` from [`AppState`] for fault-tolerant
+/// HTTP fetching.
 pub async fn serve_segment(
     session_id: ValidatedSessionId,
     origin: ValidatedOrigin,
@@ -103,7 +103,11 @@ pub async fn serve_segment(
 
     info!("Fetching segment from origin: {}", segment_url);
 
-    match fetch_with_retry(&state.http_client, &segment_url, &RetryConfig::default()).await {
+    match state
+        .default_retry_policy
+        .execute(&state.http_client, &segment_url)
+        .await
+    {
         Ok(response) => {
             let content_type = response
                 .headers()
