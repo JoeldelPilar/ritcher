@@ -131,24 +131,76 @@ impl RetryPolicy {
     ///
     /// Returns the last network or non-2xx error after all retries fail.
     pub async fn execute(&self, client: &Client, url: &str) -> Result<Response, reqwest::Error> {
-        // Step 1 (parallel-spar): delegate to the existing free function.
-        // Step 6 will invert this so the loop body lives here.
-        let config = RetryConfig {
-            max_attempts: self.max_attempts,
-            backoff: self.backoff,
-            timeout: self.timeout,
-        };
-        fetch_with_retry(client, url, &config).await
+        let max_attempts = self.max_attempts.max(1);
+
+        // Retry loop: attempts 1 through N-1, with backoff between each.
+        // The final attempt is handled separately below to guarantee a
+        // return without `unreachable!()` or other panic paths.
+        for attempt in 1..max_attempts {
+            let mut request = client.get(url);
+            if let Some(timeout) = self.timeout {
+                request = request.timeout(timeout);
+            }
+
+            match request.send().await {
+                Ok(response) if response.status().is_success() => return Ok(response),
+
+                Ok(response) => {
+                    warn!(
+                        "HTTP fetch returned {} for {} (attempt {}/{})",
+                        response.status(),
+                        url,
+                        attempt,
+                        max_attempts
+                    );
+                }
+
+                Err(e) => {
+                    warn!(
+                        "HTTP fetch failed for {} (attempt {}/{}): {}",
+                        url, attempt, max_attempts, e
+                    );
+                }
+            }
+
+            warn!("Retrying HTTP fetch in {}ms...", self.backoff.as_millis());
+            tokio::time::sleep(self.backoff).await;
+        }
+
+        // Final attempt — returns directly, no further retry
+        let mut request = client.get(url);
+        if let Some(timeout) = self.timeout {
+            request = request.timeout(timeout);
+        }
+
+        let response = request.send().await.map_err(|e| {
+            warn!(
+                "HTTP fetch failed for {} (attempt {}/{}): {}",
+                url, max_attempts, max_attempts, e
+            );
+            e
+        })?;
+
+        if !response.status().is_success() {
+            warn!(
+                "HTTP fetch returned {} for {} (attempt {}/{})",
+                response.status(),
+                url,
+                max_attempts,
+                max_attempts
+            );
+        }
+
+        response.error_for_status()
     }
 }
 
 /// Fetch a URL via HTTP GET with automatic retry and backoff.
 ///
-/// Attempts the request up to `config.max_attempts` times, sleeping
-/// `config.backoff` between each attempt.
-///
-/// Returns the first successful (2xx) [`Response`], or the last
-/// [`reqwest::Error`] encountered once all attempts are exhausted.
+/// Thin shim retained as a transitional step (step 6 of the deepening
+/// refactor). New call sites should use [`RetryPolicy::execute`] directly.
+/// This function is removed in step 7 once the integration tests are
+/// rewritten against the policy.
 ///
 /// # Errors
 ///
@@ -158,67 +210,12 @@ pub async fn fetch_with_retry(
     url: &str,
     config: &RetryConfig,
 ) -> Result<Response, reqwest::Error> {
-    let max_attempts = config.max_attempts.max(1);
-
-    // Retry loop: attempts 1 through N-1, with backoff between each.
-    // The final attempt is handled separately below to guarantee a
-    // return without `unreachable!()` or other panic paths.
-    for attempt in 1..max_attempts {
-        let mut request = client.get(url);
-        if let Some(timeout) = config.timeout {
-            request = request.timeout(timeout);
-        }
-
-        match request.send().await {
-            Ok(response) if response.status().is_success() => return Ok(response),
-
-            Ok(response) => {
-                warn!(
-                    "HTTP fetch returned {} for {} (attempt {}/{})",
-                    response.status(),
-                    url,
-                    attempt,
-                    max_attempts
-                );
-            }
-
-            Err(e) => {
-                warn!(
-                    "HTTP fetch failed for {} (attempt {}/{}): {}",
-                    url, attempt, max_attempts, e
-                );
-            }
-        }
-
-        warn!("Retrying HTTP fetch in {}ms...", config.backoff.as_millis());
-        tokio::time::sleep(config.backoff).await;
-    }
-
-    // Final attempt — returns directly, no further retry
-    let mut request = client.get(url);
-    if let Some(timeout) = config.timeout {
-        request = request.timeout(timeout);
-    }
-
-    let response = request.send().await.map_err(|e| {
-        warn!(
-            "HTTP fetch failed for {} (attempt {}/{}): {}",
-            url, max_attempts, max_attempts, e
-        );
-        e
-    })?;
-
-    if !response.status().is_success() {
-        warn!(
-            "HTTP fetch returned {} for {} (attempt {}/{})",
-            response.status(),
-            url,
-            max_attempts,
-            max_attempts
-        );
-    }
-
-    response.error_for_status()
+    let policy = RetryPolicy {
+        max_attempts: config.max_attempts,
+        backoff: config.backoff,
+        timeout: config.timeout,
+    };
+    policy.execute(client, url).await
 }
 
 #[cfg(test)]
@@ -344,7 +341,7 @@ mod tests {
         assert_eq!(cloned.timeout(), Some(Duration::from_secs(5)));
     }
 
-    // ---- Integration tests using wiremock ----
+    // ---- Integration tests using wiremock (RetryPolicy::execute) ----
 
     #[tokio::test]
     async fn succeeds_on_first_attempt() {
@@ -356,12 +353,9 @@ mod tests {
             .await;
 
         let client = Client::new();
-        let config = RetryConfig {
-            backoff: Duration::from_millis(1),
-            ..Default::default()
-        };
+        let policy = RetryPolicy::production().with_backoff(Duration::from_millis(1));
 
-        let result = fetch_with_retry(&client, &server.uri(), &config).await;
+        let result = policy.execute(&client, &server.uri()).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap().text().await.unwrap(), "ok");
     }
@@ -384,13 +378,11 @@ mod tests {
             .await;
 
         let client = Client::new();
-        let config = RetryConfig {
-            max_attempts: 2,
-            backoff: Duration::from_millis(1),
-            timeout: None,
-        };
+        let policy = RetryPolicy::production()
+            .with_attempts(2)
+            .with_backoff(Duration::from_millis(1));
 
-        let result = fetch_with_retry(&client, &server.uri(), &config).await;
+        let result = policy.execute(&client, &server.uri()).await;
         assert!(result.is_ok(), "Expected success after retry");
         assert_eq!(result.unwrap().text().await.unwrap(), "recovered");
     }
@@ -405,18 +397,19 @@ mod tests {
             .await;
 
         let client = Client::new();
-        let config = RetryConfig {
-            max_attempts: 2,
-            backoff: Duration::from_millis(1),
-            timeout: None,
-        };
+        let policy = RetryPolicy::production()
+            .with_attempts(2)
+            .with_backoff(Duration::from_millis(1));
 
-        let result = fetch_with_retry(&client, &server.uri(), &config).await;
+        let result = policy.execute(&client, &server.uri()).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
-    async fn single_attempt_no_retry() {
+    async fn no_retries_makes_exactly_one_request() {
+        // Plan §5: the deepening pass argued for this test — the constructor
+        // name documents the invariant. Asserts on request count, not just
+        // Result, so a silent regression in attempt-count semantics fails here.
         let server = MockServer::start().await;
 
         Mock::given(method("GET"))
@@ -425,13 +418,66 @@ mod tests {
             .await;
 
         let client = Client::new();
-        let config = RetryConfig {
-            max_attempts: 1,
-            backoff: Duration::from_millis(1),
-            timeout: None,
-        };
+        let policy = RetryPolicy::no_retries();
 
-        let result = fetch_with_retry(&client, &server.uri(), &config).await;
+        let result = policy.execute(&client, &server.uri()).await;
         assert!(result.is_err());
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            1,
+            "no_retries() must make exactly one request"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_treats_zero_attempts_as_one() {
+        // max_attempts == 0 is silently clamped to 1 by execute().
+        // Test that against a 200 endpoint: a single successful request is
+        // made and the response is returned (clamp is to 1, not 0).
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("clamped"))
+            .mount(&server)
+            .await;
+
+        let client = Client::new();
+        let policy = RetryPolicy::production()
+            .with_attempts(0)
+            .with_backoff(Duration::from_millis(1));
+
+        let result = policy.execute(&client, &server.uri()).await;
+        assert!(result.is_ok(), "zero attempts should clamp to one");
+        assert_eq!(result.unwrap().text().await.unwrap(), "clamped");
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            1,
+            "clamp must produce exactly one request"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_uses_provided_client() {
+        // Proves the policy borrows the caller's client rather than
+        // constructing one: a client with a default header should send
+        // that header on every request issued by execute().
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(wiremock::matchers::header("X-Marker", "from-caller"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("X-Marker", "from-caller".parse().unwrap());
+        let client = Client::builder().default_headers(headers).build().unwrap();
+
+        let policy = RetryPolicy::no_retries();
+        let result = policy.execute(&client, &server.uri()).await;
+        assert!(
+            result.is_ok(),
+            "Mock only matches when the marker header is present, so success proves the policy used the provided client"
+        );
     }
 }
