@@ -1,41 +1,21 @@
 //! HTTP fetch with automatic retry and backoff.
 //!
-//! Provides [`fetch_with_retry`] to deduplicate the retry pattern that was
-//! previously copy-pasted in `handlers/ad.rs`, `handlers/segment.rs`, and
-//! `ad/vast_provider.rs`.
+//! Provides [`RetryPolicy`] as a first-class domain type for HTTP retry
+//! semantics. The policy borrows a shared [`Client`] (one per process) and
+//! exposes an [`execute`](RetryPolicy::execute) method that performs the
+//! retry loop with fixed backoff and an optional per-attempt timeout.
 
 use reqwest::{Client, Response};
 use std::time::Duration;
 use tracing::warn;
 
-/// Default number of fetch attempts (1 initial + 1 retry).
-pub const DEFAULT_MAX_ATTEMPTS: u32 = 2;
+/// Default number of fetch attempts (1 initial + 1 retry). Used by
+/// [`RetryPolicy::production`]. Private — adjust via builder methods.
+const DEFAULT_MAX_ATTEMPTS: u32 = 2;
 
-/// Default backoff between attempts in milliseconds.
-pub const DEFAULT_BACKOFF_MS: u64 = 500;
-
-/// Configuration for [`fetch_with_retry`].
-#[derive(Debug, Clone)]
-pub struct RetryConfig {
-    /// Total number of attempts (minimum 1; 0 is treated as 1).
-    pub max_attempts: u32,
-    /// Sleep duration between consecutive attempts.
-    pub backoff: Duration,
-    /// Optional per-request timeout applied to each individual attempt.
-    ///
-    /// When `None`, the client's own timeout applies.
-    pub timeout: Option<Duration>,
-}
-
-impl Default for RetryConfig {
-    fn default() -> Self {
-        Self {
-            max_attempts: DEFAULT_MAX_ATTEMPTS,
-            backoff: Duration::from_millis(DEFAULT_BACKOFF_MS),
-            timeout: None,
-        }
-    }
-}
+/// Default backoff between attempts in milliseconds. Used by
+/// [`RetryPolicy::production`]. Private — adjust via builder methods.
+const DEFAULT_BACKOFF_MS: u64 = 500;
 
 /// Retry semantics for a Stitcher HTTP fetch — max attempts, fixed backoff,
 /// optional per-attempt timeout.
@@ -195,87 +175,13 @@ impl RetryPolicy {
     }
 }
 
-/// Fetch a URL via HTTP GET with automatic retry and backoff.
-///
-/// Thin shim retained as a transitional step (step 6 of the deepening
-/// refactor). New call sites should use [`RetryPolicy::execute`] directly.
-/// This function is removed in step 7 once the integration tests are
-/// rewritten against the policy.
-///
-/// # Errors
-///
-/// Returns the last network or non-2xx error after all retries fail.
-pub async fn fetch_with_retry(
-    client: &Client,
-    url: &str,
-    config: &RetryConfig,
-) -> Result<Response, reqwest::Error> {
-    let policy = RetryPolicy {
-        max_attempts: config.max_attempts,
-        backoff: config.backoff,
-        timeout: config.timeout,
-    };
-    policy.execute(client, url).await
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    #[test]
-    fn retry_config_defaults() {
-        let cfg = RetryConfig::default();
-        assert_eq!(cfg.max_attempts, DEFAULT_MAX_ATTEMPTS);
-        assert_eq!(cfg.backoff, Duration::from_millis(DEFAULT_BACKOFF_MS));
-        assert!(cfg.timeout.is_none());
-    }
-
-    #[test]
-    fn retry_config_custom() {
-        let cfg = RetryConfig {
-            max_attempts: 5,
-            backoff: Duration::from_millis(100),
-            timeout: Some(Duration::from_secs(10)),
-        };
-        assert_eq!(cfg.max_attempts, 5);
-        assert_eq!(cfg.backoff, Duration::from_millis(100));
-        assert_eq!(cfg.timeout, Some(Duration::from_secs(10)));
-    }
-
-    #[test]
-    fn max_attempts_zero_treated_as_one() {
-        let cfg = RetryConfig {
-            max_attempts: 0,
-            ..Default::default()
-        };
-        // max(1) guard ensures at least one attempt
-        assert_eq!(cfg.max_attempts.max(1), 1);
-    }
-
-    #[test]
-    fn retry_config_is_debug() {
-        let cfg = RetryConfig::default();
-        let debug = format!("{:?}", cfg);
-        assert!(debug.contains("max_attempts"));
-        assert!(debug.contains("backoff"));
-    }
-
-    #[test]
-    fn retry_config_is_clone() {
-        let cfg = RetryConfig {
-            max_attempts: 3,
-            backoff: Duration::from_millis(200),
-            timeout: Some(Duration::from_secs(5)),
-        };
-        let cloned = cfg.clone();
-        assert_eq!(cloned.max_attempts, 3);
-        assert_eq!(cloned.backoff, Duration::from_millis(200));
-        assert_eq!(cloned.timeout, Some(Duration::from_secs(5)));
-    }
-
-    // ---- RetryPolicy constructor & builder unit tests (Step 1) ----
+    // ---- RetryPolicy constructor & builder unit tests ----
 
     #[test]
     fn production_constructor_knobs() {
