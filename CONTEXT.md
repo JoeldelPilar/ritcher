@@ -116,6 +116,10 @@ _Avoid_: connection, request context (those mean network-layer state — a Ritch
 **Segment proxy**:
 The handler at `/stitch/{id}/segment/*` and `/stitch/{id}/ad/{name}` that streams content and ad bytes from origin to player without buffering.
 
+**RetryPolicy**:
+The value type expressing how the Stitcher retries an HTTP fetch against the Origin or an Ad provider — max attempts, fixed backoff, optional per-attempt timeout. Held on `AppState` as `default_retry_policy` for Origin/Ad-segment fetches; `VastAdProvider` composes its own with `with_timeout(...)` for VAST endpoints.
+_Avoid_: retry config, retry settings (the policy is a domain concept, not a config bag).
+
 ## Proposed (not yet implemented)
 
 Architectural seams under discussion in the current /improve-codebase-architecture session. None of these exist in `src/` yet.
@@ -141,9 +145,6 @@ Proposed module owning HLS SGAI writing — PDT synthesis, `EXT-X-DATERANGE` emi
 **ManifestStore**:
 Proposed trait wrapping origin manifest caching, with `TtlMemory` and `NoCache` adapters replacing the concrete `ManifestCache`.
 
-**RetryPolicy**:
-Proposed value type replacing the current `RetryConfig` struct, expressing HTTP retry semantics as a first-class domain concept rather than a config bag.
-
 ## Relationships
 
 - A **Stitcher** serves many **Players** and pulls from one or more **Origins**.
@@ -159,6 +160,7 @@ Proposed value type replacing the current `RetryConfig` struct, expressing HTTP 
 - **Tracking beacons** belong to **Ad segments** (via `AdTrackingInfo`) and fire when the **Segment proxy** serves them.
 - An **Asset list** belongs to one **Ad break** and lists its **Ad creatives**.
 - **Slate** substitutes for **Ad segments** or **Ad creatives** when an **Ad provider** returns nothing.
+- A **RetryPolicy** governs every Stitcher HTTP fetch to an **Origin** or **Ad provider**.
 
 ## Example dialogue
 

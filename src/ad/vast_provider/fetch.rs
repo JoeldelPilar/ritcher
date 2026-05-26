@@ -1,6 +1,6 @@
 use crate::ad::conditioning;
 use crate::ad::vast::{self, VastAdType, Verification};
-use crate::http_retry::{RetryConfig, fetch_with_retry};
+use crate::http_retry::RetryPolicy;
 use tracing::{error, warn};
 
 use super::{ResolvedVastCreative, VastAdProvider};
@@ -9,7 +9,8 @@ impl VastAdProvider {
     /// Fetch and parse VAST XML, following wrapper chains
     ///
     /// Accumulates wrapper tracking data and verification nodes through the chain.
-    /// Uses [`fetch_with_retry`] for fault-tolerant HTTP fetching.
+    /// Composes a [`RetryPolicy`] with the VAST-specific per-attempt timeout
+    /// for fault-tolerant HTTP fetching.
     ///
     /// Parameters use owned types (`String`, `Vec<T>`) instead of references
     /// because recursive async functions cannot hold borrows across `.await`
@@ -31,11 +32,8 @@ impl VastAdProvider {
             return None;
         }
 
-        let retry_cfg = RetryConfig {
-            timeout: Some(self.timeout),
-            ..Default::default()
-        };
-        let xml = match fetch_with_retry(&self.http_client, &url, &retry_cfg).await {
+        let policy = RetryPolicy::production().with_timeout(self.timeout);
+        let xml = match policy.execute(&self.http_client, &url).await {
             Ok(resp) => match resp.text().await {
                 Ok(text) => text,
                 Err(e) => {

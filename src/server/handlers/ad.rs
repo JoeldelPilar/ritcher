@@ -1,7 +1,6 @@
 use crate::{
     ad::tracking,
     error::Result,
-    http_retry::{RetryConfig, fetch_with_retry},
     metrics,
     server::{extractors::ValidatedSessionId, state::AppState},
 };
@@ -21,7 +20,8 @@ use tracing::info;
 /// `AdProvider` trait, keeping this handler decoupled from ad source details.
 /// Fires VAST tracking beacons (impressions, quartiles) as a side effect.
 ///
-/// Uses [`fetch_with_retry`] for fault-tolerant HTTP fetching.
+/// Uses the shared `default_retry_policy` from [`AppState`] for fault-tolerant
+/// HTTP fetching.
 pub async fn serve_ad(
     session_id: ValidatedSessionId,
     // Path tuple required by axum routing; session_id already validated above via ValidatedSessionId.
@@ -68,7 +68,11 @@ pub async fn serve_ad(
     let ad_url = &resolved.url;
     info!("Fetching ad segment from: {}", ad_url);
 
-    match fetch_with_retry(&state.http_client, ad_url, &RetryConfig::default()).await {
+    match state
+        .default_retry_policy
+        .execute(&state.http_client, ad_url)
+        .await
+    {
         Ok(response) => {
             let content_type = response
                 .headers()

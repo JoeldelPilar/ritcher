@@ -2,6 +2,7 @@ use crate::{
     ad::{AdProvider, DemoAdProvider, SlateProvider, StaticAdProvider, VastAdProvider},
     cache::ManifestCache,
     config::{AdProviderType, Config, SessionStoreType},
+    http_retry::RetryPolicy,
     server::{
         dns_resolver::SsrfSafeResolver, rate_limit::RateLimiter,
         url_validation::validate_origin_url,
@@ -28,6 +29,10 @@ pub struct AppState {
     pub manifest_cache: ManifestCache,
     /// Optional per-IP rate limiter (None when RATE_LIMIT_RPM=0)
     pub rate_limiter: Option<RateLimiter>,
+    /// Default retry policy applied by Origin / Ad-segment handlers when
+    /// the call site has not composed its own. The VAST provider composes
+    /// its own via `RetryPolicy::production().with_timeout(...)`.
+    pub default_retry_policy: RetryPolicy,
     /// Server start time for uptime tracking
     pub started_at: Instant,
 }
@@ -173,6 +178,7 @@ impl AppState {
             ad_provider,
             manifest_cache,
             rate_limiter,
+            default_retry_policy: RetryPolicy::production(),
             started_at: Instant::now(),
         }
     }

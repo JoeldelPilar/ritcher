@@ -18,7 +18,7 @@
 //! - [`dash`] -- DASH MPD parsing, SCTE-35 detection, period insertion
 //! - [`error`] -- Unified error type ([`RitcherError`](error::RitcherError))
 //! - [`hls`] -- HLS playlist parsing, CUE detection, SGAI interstitials
-//! - [`http_retry`] -- HTTP fetch with exponential backoff
+//! - [`http_retry`] -- HTTP fetch with fixed backoff ([`RetryPolicy`](http_retry::RetryPolicy))
 //! - [`metrics`] -- Prometheus metric definitions and recording helpers
 //! - [`server`] -- Axum routes, handlers, middleware, state
 //! - [`session`] -- Per-viewer session management (memory or Valkey)
