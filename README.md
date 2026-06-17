@@ -10,6 +10,8 @@ Ritcher is a high-performance HLS/DASH stitcher built in Rust for ad insertion. 
 
 Ritcher runs as a standalone Docker container deployable anywhere. It integrates well with the [Eyevinn Open Source Cloud](https://www.osaas.io) ecosystem — particularly as a downstream stitcher for [Channel Engine](https://github.com/Eyevinn/channel-engine) — but has no platform dependencies.
 
+**Documentation:** [Overview](docs/overview.md) · [Architecture](docs/architecture.md) · [API reference](docs/api/README.md) · [Modules](docs/modules/)
+
 ---
 
 ## Features
